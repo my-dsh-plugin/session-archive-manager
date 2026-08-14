@@ -18,7 +18,7 @@ The plugin is UI-only. It derives the archived-session rows by cross-referencing
 
 ## Screenshot
 
-![Archived Sessions settings page](assets/settings-full.png)
+![Archived Sessions settings page](assets/settings-en-full.png)
 
 The **Archived Sessions** entry sits in Settings right after **Plugins**. Rows are grouped by workspace with a small group title; sessions no workspace accounts fall into the **Ungrouped** bucket at the end. Batch actions — unarchive, delete selected, delete all — live in the toolbar above the list.
 
