@@ -29,6 +29,9 @@
   flex-wrap: wrap;
   align-items: center;
   gap: 8px;
+  /* Align the select-all checkbox with the row checkboxes below (rows carry
+   * the same 12px left padding). */
+  padding-left: 12px;
 }
 
 .selectAll {
@@ -66,7 +69,9 @@
 
 .row {
   display: grid;
-  grid-template-columns: 28px minmax(0, 1fr) auto auto;
+  /* auto column: the checkbox hugs the row's left padding instead of a fixed
+   * centered column, which would leave dead space beside it. */
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
   align-items: center;
   gap: 10px;
   padding: 10px 12px;
@@ -83,6 +88,7 @@
 
 .checkbox {
   margin: 0;
+  display: block;
   cursor: pointer;
 }
 
