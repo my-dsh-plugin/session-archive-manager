@@ -35,10 +35,12 @@ try {
 }
 
 // The patch carries only the session-archive-manager core extension; the
-// unrelated ui-settings-models locale work in the author checkout is excluded.
+// unrelated ui-settings-models locale work in the author checkout and the
+// lockfile churn (consumers run their own pnpm install) are excluded.
 const diff = execFileSync('git', [
   'diff', `${BASE}..HEAD`, '--', '.',
   ':(exclude)packages/client/ui-settings-models/**',
+  ':(exclude)pnpm-lock.yaml',
 ], { cwd: harness, encoding: 'utf8' })
 if (diff.trim().length === 0) {
   console.error(`no diff between ${BASE} and HEAD; nothing to write`)
