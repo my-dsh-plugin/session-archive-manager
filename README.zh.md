@@ -10,14 +10,19 @@
 - **取消归档**单个或选中的会话：归档时保留的工作区归属槽位会被恢复，会话重新出现在原有位置。
 - **删除**单个会话、**删除所选**或**全量删除**全部归档会话，均有内联确认，防止误删。
 - **实时刷新**：列表跟随宿主的归档集合与会话摘要实时更新；操作通过运行时 store 即时生效。
+- **能力检测**：在缺少核心 API 的 Harness 上，页面自动降级为只读列表并给出明确的升级提示，而不是出现点了报错的按钮。
+
+## 工作原理
+
+本插件只提供界面。归档行由实时的 `workspaces.list` 归档集合与 `sessions.list` 摘要交叉派生而来，所有操作都通过 `workspaces` 运行时服务调用核心的 `workspace.unarchiveSession` / `workspace.deleteSession` RPC。没有轮询，宿主侧除了 RPC 本身没有任何插件代码。
 
 ## 依赖要求
 
-本插件只提供界面，全部操作依赖核心的 `workspace.unarchiveSession` 与 `workspace.deleteSession` RPC、以及运行时 `workspaces.unarchiveSession` / `workspaces.deleteSession` 动作。Harness 目前尚未内置这些 API（也没有上游发布渠道），所以**现阶段必须使用 deepseek-harness 源码 checkout 并应用本仓库随附的补丁**。缺少这些 API 时，设置页会以只读方式显示归档列表并提示升级。
+Harness 目前尚未内置取消归档/删除 API（也没有上游发布渠道），所以**现阶段必须使用 deepseek-harness 源码 checkout 并应用本仓库随附的补丁**。缺少这些 API 时，设置页会以只读方式显示归档列表并提示升级。
 
 ## 安装
 
-### 1. 给 Harness 核心打补丁（在 API 进入上游之前必需）
+### 1. 给 Harness 核心打补丁
 
 在本仓库目录下，对着你的 deepseek-harness checkout 执行（补丁固定基于上游提交 `47f943859b`；其他提交可能需要 `git apply -3` 手工解决）：
 
@@ -30,7 +35,15 @@ npm run build:lib:client
 
 补丁文件为 `patches/dsh-core-unarchive-delete.patch`，新增两个 workspace RPC、session-persistence 的 delete 能力（JSONL/SQLite 后端）、客户端 runtime 动作及配套测试。纯增量改动，不改变任何现有行为。
 
-### 2. 把插件链接进你的 web profile
+### 2. 把插件安装进 web profile
+
+官方方式 —— 用你 harness checkout 里的 `dsh` CLI（如果 `DSH_HOME` 不是默认的 `~/.dsh`，请指向你的 harness home）：
+
+```sh
+pnpm dsh plugin add --profile web /path/to/session-archive-manager
+```
+
+该命令会添加依赖并自动 reconcile `dsh.profile.bundles` 图层列表。手工等价做法是编辑 profile 的 `package.json`：
 
 ```json
 "dependencies": {
@@ -46,9 +59,27 @@ npm run build:lib:client
 }
 ```
 
-### 3. 重启 Harness
+然后在 profile 目录里执行 `pnpm install`。
 
-设置页「插件」之后会出现「归档会话」入口。如果页面显示只读提示，说明核心补丁没有生效。
+### 3. 重启并验证
+
+重启 Harness（`npx @deepseek-ai/dsh web` 或你自己的启动方式）。设置页「插件」之后会出现「归档会话」入口。
+
+- 页面显示只读提示 → 核心补丁没有生效（检查重建步骤，或旧进程是否完全退出）。
+- 完全没有菜单入口 → 插件不在运行中 profile 的 bundle 图层里（重新执行 `dsh plugin add`，检查 bundles 列表）。
+
+## 维护
+
+补丁固定在一个 harness 基座提交上，上游移动后会产生漂移。你的 checkout 更新后，重新生成并验证补丁再提交：
+
+```sh
+node scripts/regenerate-patch.mjs /path/to/deepseek-harness
+git -C /path/to/deepseek-harness stash
+git -C /path/to/deepseek-harness apply --check /path/to/session-archive-manager/patches/dsh-core-unarchive-delete.patch
+git -C /path/to/deepseek-harness stash pop
+```
+
+再生成只覆盖本插件的核心扩展（无关的本地改动会被自动排除）。当扩展重新基于更新的上游提交时，用 `DSH_PATCH_BASE=<commit>` 指定新的基座。
 
 ## 开发
 
@@ -58,7 +89,7 @@ pnpm typecheck  # 宿主与客户端类型检查
 pnpm test       # 控制器单元测试
 ```
 
-客户端 bundle 使用 harness 共享预设（`packages/client/tsdown.client.ts`）构建；git 安装则直接使用预构建的 `lib/client.js`。
+客户端 bundle 使用 harness 共享预设（`packages/client/tsdown.client.ts`）构建。仓库随附预构建的 `lib/`，使用者克隆即可用、无需构建；只有改动插件本身时才需要重建。
 
 ## 已知限制与待办
 
