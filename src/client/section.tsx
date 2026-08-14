@@ -17,6 +17,11 @@ import type { ArchiveSnapshot, BatchResult, CardSource } from './section-control
 
 /** The registration-side face the section injects. */
 export interface ArchiveManagerSectionFace {
+  /**
+   * Whether the harness ships the core unarchive/delete RPCs. When false the
+   * page degrades to a read-only list with an upgrade notice.
+   */
+  capable: boolean
   hooks: {
     /** Live archive-set snapshot bound by the renderer as useArchivedRows. */
     archivedRows: CardSource<ArchiveSnapshot>
@@ -120,6 +125,19 @@ export function ArchiveManagerSection(props: ArchiveManagerSectionProps): React.
         <h2 className={css.title}>{t('title')}</h2>
         <p className={css.intro}>{t('intro')}</p>
         <p className={css.notice}>{t('loading')}</p>
+      </div>
+    )
+  }
+
+  if (!props.capable) {
+    return (
+      <div className={css.section}>
+        <h2 className={css.title}>{t('title')}</h2>
+        <p className={css.intro}>{t('intro')}</p>
+        <p className={`${css.notice} ${css.noticeError}`}>{t('unsupported')}</p>
+        {rows.length > 0 && (
+          <p className={css.notice}>{t('readOnly')}</p>
+        )}
       </div>
     )
   }

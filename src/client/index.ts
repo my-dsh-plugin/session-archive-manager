@@ -43,6 +43,12 @@ export function apply(ctx: ClientContext): void {
   const t = ctx.locale.bind(NS)
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'session-archive-manager: section dictionaries')
 
+  // Capability gate: on a harness without the core unarchive/delete RPCs the
+  // runtime service lacks the actions, so the page degrades to a read-only
+  // list with a clear upgrade notice instead of broken buttons.
+  const capable = typeof ctx.workspaces.unarchiveSession === 'function'
+    && typeof ctx.workspaces.deleteSession === 'function'
+
   // The derived rows source: rebuilt on every change of either live feed,
   // disposed with this plugin's fiber.
   const source = createArchiveSource(ctx.workspaces.list, ctx.sessions.list)
@@ -56,6 +62,7 @@ export function apply(ctx: ClientContext): void {
     label: () => t('nav'),
     locale: NS,
     inject: (): ArchiveManagerSectionFace => ({
+      capable,
       hooks: {
         archivedRows: source.source,
       },

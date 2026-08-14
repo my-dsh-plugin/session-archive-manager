@@ -13,37 +13,42 @@ Manage archived sessions from DeepSeek Harness Settings: view, unarchive, delete
 
 ## Requirements
 
-- A DeepSeek Harness build that ships the `workspace.unarchiveSession` and `workspace.deleteSession` RPCs plus the runtime `workspaces.unarchiveSession` / `workspaces.deleteSession` actions. The plugin is UI-only and rides those core APIs — a harness without them cannot serve the page's actions.
-- A web profile with the plugin linked (see below).
+The plugin is UI-only: it rides the core `workspace.unarchiveSession` and `workspace.deleteSession` RPCs plus the runtime `workspaces.unarchiveSession` / `workspaces.deleteSession` actions. The harness does not ship those APIs yet (no upstream release channel), so **a source checkout of deepseek-harness with the bundled patch applied is required today**. On a harness without the APIs the settings page shows the archive list read-only with an upgrade notice.
 
 ## Install
 
-1. Clone next to your harness checkout and install:
+### 1. Patch the harness core (required until the APIs ship upstream)
 
-   ```sh
-   git clone https://github.com/my-dsh-plugin/session-archive-manager.git
-   pnpm install
-   ```
+From this repository, against your deepseek-harness checkout (pinned to base commit `47f943859b`; a different commit may need `git apply -3`):
 
-2. Link it into your web profile's `package.json` dependencies:
+```sh
+node scripts/apply-patch.mjs /path/to/deepseek-harness
+cd /path/to/deepseek-harness
+npm run build:lib:host
+npm run build:lib:client
+```
 
-   ```json
-   "dependencies": {
-     "dsh-session-archive-manager": "link:/path/to/session-archive-manager"
-   }
-   ```
+The patch (`patches/dsh-core-unarchive-delete.patch`) adds the two workspace RPCs, the session-persistence delete seam with JSONL/SQLite backends, the client-runtime actions, and their tests. It is additive only — no existing behavior changes.
 
-3. Add the bundle to the profile's `dsh.profile.bundles` list:
+### 2. Link the plugin into your web profile
 
-   ```json
-   "dsh": {
-     "profile": {
-       "bundles": ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app", "dsh-session-archive-manager"]
-     }
-   }
-   ```
+```json
+"dependencies": {
+  "dsh-session-archive-manager": "link:/path/to/session-archive-manager"
+}
+```
 
-4. Restart the harness. The **Archived Sessions** entry appears in Settings, after Plugins.
+```json
+"dsh": {
+  "profile": {
+    "bundles": ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app", "dsh-session-archive-manager"]
+  }
+}
+```
+
+### 3. Restart the harness
+
+The **Archived Sessions** entry appears in Settings, after Plugins. If the page shows the read-only notice, the core patch is not active in the running build.
 
 ## Development
 

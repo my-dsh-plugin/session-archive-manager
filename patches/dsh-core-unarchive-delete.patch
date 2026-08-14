@@ -1,0 +1,1185 @@
+diff --git a/packages/client/connection/src/client/fixture.ts b/packages/client/connection/src/client/fixture.ts
+index dd0566486e..192d1450d6 100644
+--- a/packages/client/connection/src/client/fixture.ts
++++ b/packages/client/connection/src/client/fixture.ts
+@@ -2694,6 +2694,34 @@ function createFixtureWorld(options: FixtureOptions): FixtureWorld {
+         }
+         return ok(request, { archivedSessionIds: [...archivedSessionIds] })
+       },
++      unarchiveSession: (request) => {
++        const { sessionId } = request.payload
++        const index = archivedSessionIds.indexOf(sessionId)
++        if (index !== -1) {
++          archivedSessionIds.splice(index, 1)
++          emitHost({ type: 'host/archived-sessions-changed', archivedSessionIds: [...archivedSessionIds] })
++        }
++        return ok(request, { archivedSessionIds: [...archivedSessionIds] })
++      },
++      deleteSession: (request) => {
++        const missing = requireSession(request)
++        if (missing !== undefined) return missing
++        const { sessionId } = request.payload
++        const index = archivedSessionIds.indexOf(sessionId)
++        if (index !== -1) {
++          archivedSessionIds.splice(index, 1)
++          emitHost({ type: 'host/archived-sessions-changed', archivedSessionIds: [...archivedSessionIds] })
++        }
++        for (const workspace of workspaces) {
++          const without = workspace.sessionIds.filter(id => id !== sessionId)
++          if (without.length !== workspace.sessionIds.length) {
++            workspace.sessionIds = without
++            workspace.updatedAt = new Date().toISOString()
++            emitHost({ type: 'host/workspace-changed', workspace: { ...workspace } })
++          }
++        }
++        return ok(request, { archivedSessionIds: [...archivedSessionIds] })
++      },
+     },
+     agentPresets: {
+       // Both trusts appear, because a surface must present a locally authored
+@@ -3105,6 +3133,8 @@ export class FixtureApiClient extends AbstractApiClient {
+       case 'workspace.insertBefore': return this.api.workspace.insertBefore(request)
+       case 'workspace.insertSessionBefore': return this.api.workspace.insertSessionBefore(request)
+       case 'workspace.archiveSession': return this.api.workspace.archiveSession(request)
++      case 'workspace.unarchiveSession': return this.api.workspace.unarchiveSession(request)
++      case 'workspace.deleteSession': return this.api.workspace.deleteSession(request)
+       case 'skill.list': return this.api.skills.list(request)
+       case 'agentPreset.list': return this.api.agentPresets.list(request)
+       case 'agentPreset.select': return this.api.agentPresets.select(request)
+diff --git a/packages/client/connection/tests/fake-api.client.ts b/packages/client/connection/tests/fake-api.client.ts
+index bee4fc0ce0..8221192769 100644
+--- a/packages/client/connection/tests/fake-api.client.ts
++++ b/packages/client/connection/tests/fake-api.client.ts
+@@ -167,6 +167,12 @@ export class FakeApiClient implements IApiClient {
+     archiveSession: (payload: unknown) => this.record('workspace.archiveSession', payload, Promise.resolve(ok({
+       archivedSessionIds: [(payload as { sessionId: SessionId }).sessionId],
+     }))),
++    unarchiveSession: (payload: unknown) => this.record('workspace.unarchiveSession', payload, Promise.resolve(ok({
++      archivedSessionIds: [(payload as { sessionId: SessionId }).sessionId],
++    }))),
++    deleteSession: (payload: unknown) => this.record('workspace.deleteSession', payload, Promise.resolve(ok({
++      archivedSessionIds: [],
++    }))),
+   }
+ 
+   // Payloads stay `unknown` (lint-lane note above); response rows are the real
+diff --git a/packages/client/runtime/src/client/contract/workspaces.ts b/packages/client/runtime/src/client/contract/workspaces.ts
+index 4012086c3d..e32685066e 100644
+--- a/packages/client/runtime/src/client/contract/workspaces.ts
++++ b/packages/client/runtime/src/client/contract/workspaces.ts
+@@ -91,4 +91,17 @@ export interface IWorkspaces {
+    * @param sessionId - session to archive.
+    */
+   archiveSession(sessionId: SessionId): Promise<void>
++  /**
++   * Unarchive a session out of the registry-global set: it reappears on every
++   * grouping surface in its retained accounting slot.
++   * @param sessionId - session to unarchive.
++   */
++  unarchiveSession(sessionId: SessionId): Promise<void>
++  /**
++   * Delete a session durably: its stored log is removed and its workspace
++   * accounting slot and archive-set entry are dropped. A live session rejects
++   * with a `session-live` error.
++   * @param sessionId - session to delete.
++   */
++  deleteSession(sessionId: SessionId): Promise<void>
+ }
+diff --git a/packages/client/runtime/src/client/workspaces/manager.ts b/packages/client/runtime/src/client/workspaces/manager.ts
+index 9b54dbb429..fd1156917f 100644
+--- a/packages/client/runtime/src/client/workspaces/manager.ts
++++ b/packages/client/runtime/src/client/workspaces/manager.ts
+@@ -231,6 +231,31 @@ export class WorkspaceManager {
+     return result
+   }
+ 
++  /**
++   * Unarchive one session out of the registry-global set, then install the
++   * returned full set without waiting for the changed frame.
++   * @param sessionId - session to unarchive.
++   * @returns the wire result.
++   */
++  async unarchiveSession(sessionId: SessionId): Promise<RpcResult<{ archivedSessionIds: SessionId[] }>> {
++    const { result } = await this.api.workspace.unarchiveSession({ sessionId })
++    if (result.ok) this.installArchived(result.value.archivedSessionIds)
++    return result
++  }
++
++  /**
++   * Delete one session durably and install the returned full archive set
++   * without waiting for the changed frame. The workspace accounting change
++   * lands through the Host's workspace-changed frame.
++   * @param sessionId - session to delete.
++   * @returns the wire result.
++   */
++  async deleteSession(sessionId: SessionId): Promise<RpcResult<{ archivedSessionIds: SessionId[] }>> {
++    const { result } = await this.api.workspace.deleteSession({ sessionId })
++    if (result.ok) this.installArchived(result.value.archivedSessionIds)
++    return result
++  }
++
+   /**
+    * Host-frame entry. Non-workspace frames are ignored so the runtime can
+    * fan one host stream out to both object managers.
+diff --git a/packages/client/runtime/src/client/workspaces/service.ts b/packages/client/runtime/src/client/workspaces/service.ts
+index c23e3b3a6c..94359117a9 100644
+--- a/packages/client/runtime/src/client/workspaces/service.ts
++++ b/packages/client/runtime/src/client/workspaces/service.ts
+@@ -292,6 +292,27 @@ export class WorkspaceRuntime implements IWorkspaces {
+     if (!result.ok) throw new Error(`session archive failed: ${result.error.code}: ${result.error.message}`)
+   }
+ 
++  /**
++   * Unarchive a session out of the registry-global set: it reappears on every
++   * grouping surface in its retained accounting slot.
++   * @param sessionId - session to unarchive.
++   */
++  async unarchiveSession(sessionId: SessionId): Promise<void> {
++    const result = await this.manager.unarchiveSession(sessionId)
++    if (!result.ok) throw new Error(`session unarchive failed: ${result.error.code}: ${result.error.message}`)
++  }
++
++  /**
++   * Delete a session durably: its stored log is removed and its workspace
++   * accounting slot and archive-set entry are dropped. A live session rejects
++   * with a `session-live` error.
++   * @param sessionId - session to delete.
++   */
++  async deleteSession(sessionId: SessionId): Promise<void> {
++    const result = await this.manager.deleteSession(sessionId)
++    if (!result.ok) throw new Error(`session delete failed: ${result.error.code}: ${result.error.message}`)
++  }
++
+   /**
+    * Move a session within its Workspace's manual order (DOM-insertBefore-like).
+    * @param workspaceId - owning workspace.
+diff --git a/packages/client/runtime/tests/fake-api.client.ts b/packages/client/runtime/tests/fake-api.client.ts
+index 33a0efbbfd..042f808316 100644
+--- a/packages/client/runtime/tests/fake-api.client.ts
++++ b/packages/client/runtime/tests/fake-api.client.ts
+@@ -204,6 +204,12 @@ export class FakeApiClient implements IApiClient {
+   onWorkspaceArchiveSession: (payload: unknown) => Promise<RpcResponse<{ archivedSessionIds: SessionId[] }>> =
+     payload => Promise.resolve(ok({ archivedSessionIds: [(payload as { sessionId: SessionId }).sessionId] }))
+ 
++  onWorkspaceUnarchiveSession: (payload: unknown) => Promise<RpcResponse<{ archivedSessionIds: SessionId[] }>> =
++    payload => Promise.resolve(ok({ archivedSessionIds: [(payload as { sessionId: SessionId }).sessionId] }))
++
++  onWorkspaceDeleteSession: (payload: unknown) => Promise<RpcResponse<{ archivedSessionIds: SessionId[] }>> =
++    _payload => Promise.resolve(ok({ archivedSessionIds: [] }))
++
+   readonly workspace: IApiClient['workspace'] = {
+     list: (payload: unknown) => this.record('workspace.list', payload, this.onWorkspaceList(payload).then(response => (
+       response.result.ok
+@@ -219,6 +225,10 @@ export class FakeApiClient implements IApiClient {
+       this.record('workspace.insertSessionBefore', payload, this.onWorkspaceInsertSessionBefore(payload)),
+     archiveSession: (payload: unknown) =>
+       this.record('workspace.archiveSession', payload, this.onWorkspaceArchiveSession(payload)),
++    unarchiveSession: (payload: unknown) =>
++      this.record('workspace.unarchiveSession', payload, this.onWorkspaceUnarchiveSession(payload)),
++    deleteSession: (payload: unknown) =>
++      this.record('workspace.deleteSession', payload, this.onWorkspaceDeleteSession(payload)),
+   }
+ 
+   // Payloads stay `unknown` (lint-lane note above); response rows are the real
+diff --git a/packages/client/runtime/tests/workspaces-service.client.spec.ts b/packages/client/runtime/tests/workspaces-service.client.spec.ts
+index cfdfa98e9b..48f1d38a7c 100644
+--- a/packages/client/runtime/tests/workspaces-service.client.spec.ts
++++ b/packages/client/runtime/tests/workspaces-service.client.spec.ts
+@@ -488,6 +488,63 @@ describe('WorkspaceRuntime', () => {
+     expect(workspaces.list.getSnapshot().archivedSessionIds).toEqual(['s-open'])
+   })
+ 
++  it('unarchives a session, projecting the unary echo and the changed frame', async () => {
++    const ctx = new Context()
++    const api = new FakeApiClient()
++    const sessions = new SessionRuntime(ctx, api, fakeRemote())
++    const workspaces = new WorkspaceRuntime(ctx, api, sessions)
++    api.onWorkspaceList = () => Promise.resolve(ok({
++      items: [],
++      archivedSessionIds: [sid('s-idle')],
++    }) as never)
++    await workspaces.refresh()
++    api.onWorkspaceUnarchiveSession = () => Promise.resolve(ok({ archivedSessionIds: [] }))
++
++    // The unary echo installs the full updated set without waiting for the frame.
++    await expect(workspaces.unarchiveSession(sid('s-idle'))).resolves.toBeUndefined()
++    expect(api.callsOf('workspace.unarchiveSession')).toEqual([{ sessionId: 's-idle' }])
++    expect(workspaces.list.getSnapshot().archivedSessionIds).toEqual([])
++
++    // A remote frame re-installs the set; the idempotent repeat echoes it back.
++    workspaces.handleHostEnvelope({
++      rpcId: 'frame' as never,
++      payload: { type: 'host/archived-sessions-changed', archivedSessionIds: [sid('s-idle')] },
++    } as never)
++    await new Promise(resolve => setTimeout(resolve, 0))
++    expect(workspaces.list.getSnapshot().archivedSessionIds).toEqual(['s-idle'])
++
++    // A Host failure leaves the set untouched.
++    api.onWorkspaceUnarchiveSession = () => Promise.resolve(err({
++      code: 'session-not-found', message: 'no session ghost', details: { sessionId: sid('ghost') },
++    }))
++    await expect(workspaces.unarchiveSession(sid('ghost'))).rejects.toThrow(/session-not-found/)
++    expect(workspaces.list.getSnapshot().archivedSessionIds).toEqual(['s-idle'])
++  })
++
++  it('deletes a session, projecting the returned archive set and the failure codes', async () => {
++    const ctx = new Context()
++    const api = new FakeApiClient()
++    const sessions = new SessionRuntime(ctx, api, fakeRemote())
++    const workspaces = new WorkspaceRuntime(ctx, api, sessions)
++    api.onWorkspaceList = () => Promise.resolve(ok({
++      items: [],
++      archivedSessionIds: [sid('s-gone')],
++    }) as never)
++    await workspaces.refresh()
++
++    // The unary echo installs the full updated set without waiting for the frame.
++    await expect(workspaces.deleteSession(sid('s-gone'))).resolves.toBeUndefined()
++    expect(api.callsOf('workspace.deleteSession')).toEqual([{ sessionId: 's-gone' }])
++    expect(workspaces.list.getSnapshot().archivedSessionIds).toEqual([])
++
++    // A live-session refusal surfaces as a session-live error and keeps the set.
++    api.onWorkspaceDeleteSession = () => Promise.resolve(err({
++      code: 'session-live', message: 'the session is live', details: { sessionId: sid('s-open') },
++    }))
++    await expect(workspaces.deleteSession(sid('s-open'))).rejects.toThrow(/session-live/)
++    expect(workspaces.list.getSnapshot().archivedSessionIds).toEqual([])
++  })
++
+   it('clears a current archived by a remote frame and shields the set from a stale in-flight baseline', async () => {
+     const ctx = new Context()
+     const api = new FakeApiClient()
+diff --git a/packages/feedback/message-feedback/tests/helpers.ts b/packages/feedback/message-feedback/tests/helpers.ts
+index f902ba38d7..2474120571 100644
+--- a/packages/feedback/message-feedback/tests/helpers.ts
++++ b/packages/feedback/message-feedback/tests/helpers.ts
+@@ -173,6 +173,12 @@ class TestPersistence extends SessionPersistence {
+   setDurable(inspection: SessionInspection): void {
+     this.durable.set(inspection.meta.id, inspection)
+   }
++
++  delete(id: SessionId): Promise<void> {
++    this.durable.delete(id)
++    this.logical.delete(id)
++    return Promise.resolve()
++  }
+ }
+ 
+ export interface TestHarness {
+diff --git a/packages/host/apiproxy/src/api-proxy.ts b/packages/host/apiproxy/src/api-proxy.ts
+index bda99362b6..17aebfa95f 100644
+--- a/packages/host/apiproxy/src/api-proxy.ts
++++ b/packages/host/apiproxy/src/api-proxy.ts
+@@ -25,7 +25,7 @@ import { isUserInvocable } from '@deepseek-ai/dsh-skill'
+ import type { Workspace, WorkspaceRecord } from '@deepseek-ai/dsh-workspace'
+ import {
+   workspaceDomainState, workspaceRecord, WorkspaceId as brandWorkspaceId,
+-  WorkspaceMoveInvalidError, WorkspaceOrderInvalidError, WorkspaceUnknownSessionError,
++  WorkspaceMoveInvalidError, WorkspaceOrderInvalidError, WorkspaceSessionLiveError, WorkspaceUnknownSessionError,
+ } from '@deepseek-ai/dsh-workspace'
+ // Type-only: brings the `ctx.tools` Context merge into this program (viewFor reads presenters).
+ import {
+@@ -125,6 +125,9 @@ const DEFAULT_MAX_MESSAGES = 50
+  */
+ const WEB_SETTINGS_NAMESPACES = [
+   'agent-loop', 'shell', 'locale', 'permission', 'ui-conversation', 'ui-theme', 'web-search-deepseek',
++  // Local patch: expose the thinking-level-override plugin's settings section
++  // to the Web client so its settings card can read and write it.
++  'thinking-level-override',
+ ] as const
+ 
+ /** Provider work budget: at most 100 calls and 2,000 inspected hits. */
+@@ -2918,6 +2921,38 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
+         }
+         return ok(request, { archivedSessionIds: [...ctx.workspaceRegistry.archivedSessionIds] })
+       },
++
++      async unarchiveSession(request) {
++        const { sessionId } = request.payload
++        await ctx.workspaceRegistry.unarchiveSession(sessionId)
++        return ok(request, { archivedSessionIds: [...ctx.workspaceRegistry.archivedSessionIds] })
++      },
++
++      async deleteSession(request) {
++        const { sessionId } = request.payload
++        try {
++          await ctx.workspaceRegistry.deleteSession(sessionId)
++        } catch (error: unknown) {
++          // The registry's unknown-session and live-session rejections are the
++          // business codes; storage/durability failures propagate as internal errors.
++          if (error instanceof WorkspaceUnknownSessionError) {
++            return err(request, {
++              code: 'session-not-found',
++              message: error.message,
++              details: { sessionId },
++            })
++          }
++          if (error instanceof WorkspaceSessionLiveError) {
++            return err(request, {
++              code: 'session-live',
++              message: error.message,
++              details: { sessionId },
++            })
++          }
++          throw error
++        }
++        return ok(request, { archivedSessionIds: [...ctx.workspaceRegistry.archivedSessionIds] })
++      },
+     },
+ 
+     host: {
+diff --git a/packages/host/apiproxy/src/api/rpc-map.ts b/packages/host/apiproxy/src/api/rpc-map.ts
+index 80dede1799..a702083bf3 100644
+--- a/packages/host/apiproxy/src/api/rpc-map.ts
++++ b/packages/host/apiproxy/src/api/rpc-map.ts
+@@ -50,6 +50,8 @@ export interface RpcMethodMap {
+   'workspace.insertBefore': WorkspaceApi['insertBefore']
+   'workspace.insertSessionBefore': WorkspaceApi['insertSessionBefore']
+   'workspace.archiveSession': WorkspaceApi['archiveSession']
++  'workspace.unarchiveSession': WorkspaceApi['unarchiveSession']
++  'workspace.deleteSession': WorkspaceApi['deleteSession']
+   'skill.list': SkillsApi['list']
+   'agentPreset.list': AgentPresetsApi['list']
+   'agentPreset.select': AgentPresetsApi['select']
+diff --git a/packages/host/apiproxy/src/api/rpc.schema.ts b/packages/host/apiproxy/src/api/rpc.schema.ts
+index 177f0ffd29..8c2e79a378 100644
+--- a/packages/host/apiproxy/src/api/rpc.schema.ts
++++ b/packages/host/apiproxy/src/api/rpc.schema.ts
+@@ -35,6 +35,7 @@ export const rpcErrorSchema: z.ZodType<RpcError> = z.discriminatedUnion('code',
+   z.object({ code: z.literal('bad-request'), message: z.string(), details: z.object({ issues: z.array(z.custom<ZodIssue>()) }) }),
+   z.object({ code: z.literal('cancelled'), message: z.string(), details: z.object({}) }),
+   z.object({ code: z.literal('session-not-found'), message: z.string(), details: z.object({ sessionId: z.string() }) }),
++  z.object({ code: z.literal('session-live'), message: z.string(), details: z.object({ sessionId: z.string() }) }),
+   z.object({ code: z.literal('model-unavailable'), message: z.string(), details: z.object({ provider: z.string(), model: z.string() }) }),
+   z.object({ code: z.literal('session-conflict'), message: z.string(), details: z.object({ sessionId: z.string(), requestedCwd: z.string(), existingCwd: z.string().optional() }) }),
+   z.object({ code: z.literal('invalid-time-zone'), message: z.string(), details: z.object({ value: z.string() }) }),
+diff --git a/packages/host/apiproxy/src/api/rpc.ts b/packages/host/apiproxy/src/api/rpc.ts
+index 134a39eba9..f7350290a6 100644
+--- a/packages/host/apiproxy/src/api/rpc.ts
++++ b/packages/host/apiproxy/src/api/rpc.ts
+@@ -33,6 +33,7 @@ export interface RpcErrorDetailsMap {
+   'bad-request': { issues: ZodIssue[] }
+   'cancelled': {}
+   'session-not-found': { sessionId: SessionId }
++  'session-live': { sessionId: SessionId }
+   'model-unavailable': { provider: string; model: string }
+   'session-conflict': { sessionId: SessionId; requestedCwd: string; existingCwd?: string }
+   'invalid-time-zone': { value: string }
+diff --git a/packages/host/apiproxy/src/api/workspace.schema.ts b/packages/host/apiproxy/src/api/workspace.schema.ts
+index b57305141c..5a1ddf0e72 100644
+--- a/packages/host/apiproxy/src/api/workspace.schema.ts
++++ b/packages/host/apiproxy/src/api/workspace.schema.ts
+@@ -98,3 +98,23 @@ export const workspaceArchiveSessionRequestSchema = z.object({
+ export const workspaceArchiveSessionValueSchema = z.object({
+   archivedSessionIds: z.array(sessionIdSchema),
+ }) satisfies z.ZodType<Wire<ResponseValue<'workspace.archiveSession'>>>
++
++/** workspace.unarchiveSession request payload. */
++export const workspaceUnarchiveSessionRequestSchema = z.object({
++  sessionId: sessionIdSchema,
++}) satisfies z.ZodType<Wire<RequestPayload<'workspace.unarchiveSession'>>>
++
++/** workspace.unarchiveSession response value: the full updated archive set. */
++export const workspaceUnarchiveSessionValueSchema = z.object({
++  archivedSessionIds: z.array(sessionIdSchema),
++}) satisfies z.ZodType<Wire<ResponseValue<'workspace.unarchiveSession'>>>
++
++/** workspace.deleteSession request payload. */
++export const workspaceDeleteSessionRequestSchema = z.object({
++  sessionId: sessionIdSchema,
++}) satisfies z.ZodType<Wire<RequestPayload<'workspace.deleteSession'>>>
++
++/** workspace.deleteSession response value: the full updated archive set. */
++export const workspaceDeleteSessionValueSchema = z.object({
++  archivedSessionIds: z.array(sessionIdSchema),
++}) satisfies z.ZodType<Wire<ResponseValue<'workspace.deleteSession'>>>
+diff --git a/packages/host/apiproxy/src/api/workspace.ts b/packages/host/apiproxy/src/api/workspace.ts
+index d36d0c406e..f92bf54712 100644
+--- a/packages/host/apiproxy/src/api/workspace.ts
++++ b/packages/host/apiproxy/src/api/workspace.ts
+@@ -106,4 +106,25 @@ export interface WorkspaceApi {
+    */
+   archiveSession(request: RpcRequest<{ sessionId: SessionId }>):
+   Promise<RpcResponse<{ archivedSessionIds: SessionId[] }>>
++
++  /**
++   * Removes one session from the registry-global archive set: the session
++   * reappears on every grouping surface in its retained accounting slot.
++   * Idempotent for an id outside the set; the session's existence is not
++   * consulted, so a stale archived id whose log vanished can always be
++   * cleaned up. Returns the full updated set (same snapshot the changed
++   * frame carries).
++   */
++  unarchiveSession(request: RpcRequest<{ sessionId: SessionId }>):
++  Promise<RpcResponse<{ archivedSessionIds: SessionId[] }>>
++
++  /**
++   * Deletes one session durably: its stored log is removed from session
++   * persistence, and its workspace accounting slot and archive-set entry are
++   * dropped. A live session fails with `session-live`; a session neither
++   * live nor in session persistence fails with `session-not-found`. Returns
++   * the full updated archive set.
++   */
++  deleteSession(request: RpcRequest<{ sessionId: SessionId }>):
++  Promise<RpcResponse<{ archivedSessionIds: SessionId[] }>>
+ }
+diff --git a/packages/host/apiproxy/src/fetch/client.ts b/packages/host/apiproxy/src/fetch/client.ts
+index 70e3ece58f..a08f387503 100644
+--- a/packages/host/apiproxy/src/fetch/client.ts
++++ b/packages/host/apiproxy/src/fetch/client.ts
+@@ -35,10 +35,12 @@ import {
+   workspaceArchiveSessionValueSchema,
+   workspaceCreateValueSchema,
+   workspaceDeleteValueSchema,
++  workspaceDeleteSessionValueSchema,
+   workspaceInsertBeforeValueSchema,
+   workspaceInsertSessionBeforeValueSchema,
+   workspaceListValueSchema,
+   workspaceRenameValueSchema,
++  workspaceUnarchiveSessionValueSchema,
+ } from '../api/workspace.schema.ts'
+ import { skillListValueSchema } from '../api/skills.schema.ts'
+ import {
+@@ -120,6 +122,8 @@ export interface IApiClient {
+     insertBefore(payload: RequestPayload<'workspace.insertBefore'>, signal?: AbortSignal): Promise<RpcResponse<ResponseValue<'workspace.insertBefore'>>>
+     insertSessionBefore(payload: RequestPayload<'workspace.insertSessionBefore'>, signal?: AbortSignal): Promise<RpcResponse<ResponseValue<'workspace.insertSessionBefore'>>>
+     archiveSession(payload: RequestPayload<'workspace.archiveSession'>, signal?: AbortSignal): Promise<RpcResponse<ResponseValue<'workspace.archiveSession'>>>
++    unarchiveSession(payload: RequestPayload<'workspace.unarchiveSession'>, signal?: AbortSignal): Promise<RpcResponse<ResponseValue<'workspace.unarchiveSession'>>>
++    deleteSession(payload: RequestPayload<'workspace.deleteSession'>, signal?: AbortSignal): Promise<RpcResponse<ResponseValue<'workspace.deleteSession'>>>
+   }
+   skills: {
+     list(payload: RequestPayload<'skill.list'>, signal?: AbortSignal): Promise<RpcResponse<ResponseValue<'skill.list'>>>
+@@ -198,6 +202,8 @@ const UNARY_VALUE_SCHEMAS: { [K in keyof RpcMethodMap]: z.ZodType<Wire<ResponseV
+   'workspace.insertBefore': workspaceInsertBeforeValueSchema,
+   'workspace.insertSessionBefore': workspaceInsertSessionBeforeValueSchema,
+   'workspace.archiveSession': workspaceArchiveSessionValueSchema,
++  'workspace.unarchiveSession': workspaceUnarchiveSessionValueSchema,
++  'workspace.deleteSession': workspaceDeleteSessionValueSchema,
+   'skill.list': skillListValueSchema,
+   'agentPreset.list': agentPresetListValueSchema,
+   'agentPreset.select': agentPresetSelectValueSchema,
+@@ -451,6 +457,8 @@ export abstract class AbstractApiClient implements IApiClient {
+     insertBefore: (payload, signal) => this.callUnary('workspace.insertBefore', payload, signal),
+     insertSessionBefore: (payload, signal) => this.callUnary('workspace.insertSessionBefore', payload, signal),
+     archiveSession: (payload, signal) => this.callUnary('workspace.archiveSession', payload, signal),
++    unarchiveSession: (payload, signal) => this.callUnary('workspace.unarchiveSession', payload, signal),
++    deleteSession: (payload, signal) => this.callUnary('workspace.deleteSession', payload, signal),
+   }
+ 
+   readonly skills: IApiClient['skills'] = {
+diff --git a/packages/host/apiproxy/src/fetch/handler.ts b/packages/host/apiproxy/src/fetch/handler.ts
+index 697171ec53..4cd987cc12 100644
+--- a/packages/host/apiproxy/src/fetch/handler.ts
++++ b/packages/host/apiproxy/src/fetch/handler.ts
+@@ -38,10 +38,12 @@ import {
+   workspaceArchiveSessionRequestSchema,
+   workspaceCreateRequestSchema,
+   workspaceDeleteRequestSchema,
++  workspaceDeleteSessionRequestSchema,
+   workspaceInsertBeforeRequestSchema,
+   workspaceInsertSessionBeforeRequestSchema,
+   workspaceListRequestSchema,
+   workspaceRenameRequestSchema,
++  workspaceUnarchiveSessionRequestSchema,
+ } from '../api/workspace.schema.ts'
+ import { skillListRequestSchema } from '../api/skills.schema.ts'
+ import {
+@@ -116,6 +118,8 @@ const UNARY_ROUTES: UnaryRoutes = {
+   'workspace.insertBefore': { schema: workspaceInsertBeforeRequestSchema, invoke: (api, r) => api.workspace.insertBefore(r) },
+   'workspace.insertSessionBefore': { schema: workspaceInsertSessionBeforeRequestSchema, invoke: (api, r) => api.workspace.insertSessionBefore(r) },
+   'workspace.archiveSession': { schema: workspaceArchiveSessionRequestSchema, invoke: (api, r) => api.workspace.archiveSession(r) },
++  'workspace.unarchiveSession': { schema: workspaceUnarchiveSessionRequestSchema, invoke: (api, r) => api.workspace.unarchiveSession(r) },
++  'workspace.deleteSession': { schema: workspaceDeleteSessionRequestSchema, invoke: (api, r) => api.workspace.deleteSession(r) },
+   'skill.list': { schema: skillListRequestSchema, invoke: (api, r) => api.skills.list(r) },
+   'agentPreset.list': { schema: agentPresetListRequestSchema, invoke: (api, r) => api.agentPresets.list(r) },
+   'agentPreset.select': { schema: agentPresetSelectRequestSchema, invoke: (api, r) => api.agentPresets.select(r) },
+diff --git a/packages/host/apiproxy/tests/api-proxy-cold.spec.ts b/packages/host/apiproxy/tests/api-proxy-cold.spec.ts
+index ef642082ac..4b2ae2b61b 100644
+--- a/packages/host/apiproxy/tests/api-proxy-cold.spec.ts
++++ b/packages/host/apiproxy/tests/api-proxy-cold.spec.ts
+@@ -284,6 +284,7 @@ describe('cold history recovery view', () => {
+       ),
+       appendBatch: () => Promise.resolve(),
+       commitRepair: () => Promise.resolve(),
++      deleteStored: () => Promise.resolve(),
+       list: () => Promise.resolve([structuredClone(meta)]),
+     }
+     const coordinator = new PersistenceCoordinator(ctx, backend)
+diff --git a/packages/host/apiproxy/tests/api-proxy-workspace.spec.ts b/packages/host/apiproxy/tests/api-proxy-workspace.spec.ts
+index 54bdb015e4..fb4d41c3b9 100644
+--- a/packages/host/apiproxy/tests/api-proxy-workspace.spec.ts
++++ b/packages/host/apiproxy/tests/api-proxy-workspace.spec.ts
+@@ -567,4 +567,55 @@ describe('Host Workspace increments', () => {
+     })
+     abort.abort()
+   })
++
++  it('unarchives a session out of the global set, streaming the changed set once', async () => {
++    const { api, root } = await harness()
++    const workspace = expectOk(await api.workspace.create(request({ path: stageDir(root, 'unarchive-home') }))).workspace
++    const sessionId = SessionId('session-to-unarchive')
++    expectOk(await api.sessions.create(request({ workspaceId: workspace.workspaceId, sessionId })))
++    expectOk(await api.workspace.archiveSession(request({ sessionId })))
++    expect(expectOk(await api.workspace.list(request({}))).archivedSessionIds).toEqual([sessionId])
++
++    const abort = new AbortController()
++    const stream: AsyncIterator<RpcRequest<HostFrame>> =
++      api.events.host(request({}), abort.signal)[Symbol.asyncIterator]()
++    const changed = nextHostFrame(stream)
++    expect(expectOk(await api.workspace.unarchiveSession(request({ sessionId }))).archivedSessionIds)
++      .toEqual([])
++    expect(await changed).toMatchObject({
++      payload: { type: 'host/archived-sessions-changed', archivedSessionIds: [] },
++    })
++
++    // The idempotent repeat emits no second frame: the next observed frame is
++    // the workspace-changed of a later attach, not another unarchive snapshot.
++    const after = nextHostFrame(stream)
++    expect(expectOk(await api.workspace.unarchiveSession(request({ sessionId }))).archivedSessionIds)
++      .toEqual([])
++    const otherSession = SessionId('session-after-unarchive')
++    expectOk(await api.sessions.create(request({ workspaceId: workspace.workspaceId, sessionId: otherSession })))
++    expect((await after).payload.type).not.toBe('host/archived-sessions-changed')
++
++    // Stale ids outside the set resolve without consulting existence.
++    expect(expectOk(await api.workspace.unarchiveSession(request({ sessionId: SessionId('session-ghost') })))
++      .archivedSessionIds).toEqual([])
++    abort.abort()
++  })
++
++  it('refuses to delete a live session with session-live and an unknown one with session-not-found', async () => {
++    const { api, root } = await harness()
++    const workspace = expectOk(await api.workspace.create(request({ path: stageDir(root, 'delete-home') }))).workspace
++    const sessionId = SessionId('session-to-delete')
++    expectOk(await api.sessions.create(request({ workspaceId: workspace.workspaceId, sessionId })))
++
++    const live = await api.workspace.deleteSession(request({ sessionId }))
++    expect(live.result).toMatchObject({
++      ok: false,
++      error: { code: 'session-live', details: { sessionId } },
++    })
++    const missing = await api.workspace.deleteSession(request({ sessionId: SessionId('session-ghost') }))
++    expect(missing.result).toMatchObject({
++      ok: false,
++      error: { code: 'session-not-found', details: { sessionId: 'session-ghost' } },
++    })
++  })
+ })
+diff --git a/packages/host/apiproxy/tests/client-handler.spec.ts b/packages/host/apiproxy/tests/client-handler.spec.ts
+index 4130d8f210..7536f21012 100644
+--- a/packages/host/apiproxy/tests/client-handler.spec.ts
++++ b/packages/host/apiproxy/tests/client-handler.spec.ts
+@@ -88,6 +88,8 @@ function scriptedApi(overrides: {
+       insertBefore: r => ok(r, { workspaceIds: [r.payload.workspaceId] }),
+       insertSessionBefore: r => ok(r, { workspace: { workspaceId: 'w1' as never, path: '/t', title: 't', sessionIds: [], createdAt: '0', updatedAt: '0' } }),
+       archiveSession: r => ok(r, { archivedSessionIds: [r.payload.sessionId] }),
++      unarchiveSession: r => ok(r, { archivedSessionIds: [] }),
++      deleteSession: r => ok(r, { archivedSessionIds: [] }),
+     },
+     skills: { list: r => ok(r, { skills: [] }), ...overrides.skills },
+     agentPresets: {
+diff --git a/packages/host/apiproxy/tests/fetch-carrier.spec.ts b/packages/host/apiproxy/tests/fetch-carrier.spec.ts
+index 2000f708ba..9516e88edc 100644
+--- a/packages/host/apiproxy/tests/fetch-carrier.spec.ts
++++ b/packages/host/apiproxy/tests/fetch-carrier.spec.ts
+@@ -191,6 +191,12 @@ function fakeApi(overrides: Partial<{ muxFrames: MuxFrame[]; hostFrames: HostFra
+       async archiveSession(request) {
+         return { rpcId: request.rpcId, result: { ok: true, value: { archivedSessionIds: [request.payload.sessionId] } } }
+       },
++      async unarchiveSession(request) {
++        return { rpcId: request.rpcId, result: { ok: true, value: { archivedSessionIds: [] } } }
++      },
++      async deleteSession(request) {
++        return { rpcId: request.rpcId, result: { ok: true, value: { archivedSessionIds: [] } } }
++      },
+     },
+     agentPresets: {
+       list(request: RpcRequest<{}>) {
+diff --git a/packages/session-query/session-query-sqlite/tests/sqlite.spec.ts b/packages/session-query/session-query-sqlite/tests/sqlite.spec.ts
+index 0a565fe021..230b0831df 100644
+--- a/packages/session-query/session-query-sqlite/tests/sqlite.spec.ts
++++ b/packages/session-query/session-query-sqlite/tests/sqlite.spec.ts
+@@ -177,6 +177,11 @@ class TestPersistence extends SessionPersistence {
+     await TestPersistence.snapshotEffect?.(signal)
+     return snapshots
+   }
++
++  delete(id: SessionIdType): Promise<void> {
++    TestPersistence.entries.delete(id)
++    return Promise.resolve()
++  }
+ }
+ 
+ async function liveContext(config: ConstructorParameters<typeof SqliteSessionQueryEngine>[1] = { path: ':memory:' }): Promise<Context> {
+diff --git a/packages/session-query/session-query/tests/session-query.spec.ts b/packages/session-query/session-query/tests/session-query.spec.ts
+index 119188eb5a..0d283eae90 100644
+--- a/packages/session-query/session-query/tests/session-query.spec.ts
++++ b/packages/session-query/session-query/tests/session-query.spec.ts
+@@ -120,6 +120,11 @@ class TestPersistence extends SessionPersistence {
+       revision: SessionPersistenceRevision(`events:${entry.events.length}`),
+     }))
+   }
++
++  delete(id: SessionIdType): Promise<void> {
++    TestPersistence.entries.delete(id)
++    return Promise.resolve()
++  }
+ }
+ 
+ async function liveContext(config: ConstructorParameters<typeof TestSessionQueryEngine>[1] = {}): Promise<Context> {
+diff --git a/packages/session-query/session-query/tests/tracing.spec.ts b/packages/session-query/session-query/tests/tracing.spec.ts
+index 0bff6c1154..2d68338256 100644
+--- a/packages/session-query/session-query/tests/tracing.spec.ts
++++ b/packages/session-query/session-query/tests/tracing.spec.ts
+@@ -94,6 +94,11 @@ class TracePersistence extends SessionPersistence {
+   listSnapshots(): Promise<never[]> {
+     return Promise.resolve([])
+   }
++
++  delete(id: SessionIdType): Promise<void> {
++    TracePersistence.entries.delete(id)
++    return Promise.resolve()
++  }
+ }
+ 
+ async function queryContext(): Promise<Context> {
+diff --git a/packages/session/session-checkpoint-policy/tests/session-checkpoint-policy.spec.ts b/packages/session/session-checkpoint-policy/tests/session-checkpoint-policy.spec.ts
+index 21a04c90c2..2cdec1a665 100644
+--- a/packages/session/session-checkpoint-policy/tests/session-checkpoint-policy.spec.ts
++++ b/packages/session/session-checkpoint-policy/tests/session-checkpoint-policy.spec.ts
+@@ -29,6 +29,7 @@ class TestPersistence extends SessionPersistence {
+   }
+   list(): Promise<SessionHeader[]> { return Promise.resolve([]) }
+   listSnapshots(): Promise<never[]> { return Promise.resolve([]) }
++  delete(_id: SessionId): Promise<void> { return Promise.resolve() }
+ }
+ 
+ class RecordingAdapter extends LlmAdapter {
+diff --git a/packages/session/session-persistence-jsonl/src/index.ts b/packages/session/session-persistence-jsonl/src/index.ts
+index 5113746fec..b783339072 100644
+--- a/packages/session/session-persistence-jsonl/src/index.ts
++++ b/packages/session/session-persistence-jsonl/src/index.ts
+@@ -199,6 +199,10 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
+     return this.coordinator.readFrom(id, fromSeq, signal)
+   }
+ 
++  delete(id: SessionId): Promise<void> {
++    return this.coordinator.delete(id)
++  }
++
+   // One method serves both public `list` and the backend hook; delegating it to
+   // the coordinator would call this hook recursively.
+ 
+@@ -215,6 +219,21 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
+     return this.readPrefix(path, id, signal)
+   }
+ 
++  /**
++   * Remove one session's physical log file across all project directories.
++   * A session with no artifact resolves without writing; a duplicate artifact
++   * still rejects so a half-deleted duplicate never hides behind a successful
++   * delete.
++   */
++  async deleteStored(id: SessionId, signal?: AbortSignal): Promise<void> {
++    signal?.throwIfAborted()
++    await this.ensureRootEncoding()
++    signal?.throwIfAborted()
++    const path = await this.findLog(id, signal)
++    if (path === undefined) return
++    await rm(path, { force: true })
++  }
++
+   /**
+    * Read one log's stat-derived revision without loading its event bytes.
+    * Resolving an id with unknown cwd still scans the project directories.
+diff --git a/packages/session/session-persistence-sqlite/src/index.ts b/packages/session/session-persistence-sqlite/src/index.ts
+index 969f1f5fac..ff8dae2c89 100644
+--- a/packages/session/session-persistence-sqlite/src/index.ts
++++ b/packages/session/session-persistence-sqlite/src/index.ts
+@@ -198,6 +198,10 @@ export class SqliteSessionPersistence extends SessionPersistence implements Pers
+     return this.coordinator.readFrom(id, fromSeq, signal)
+   }
+ 
++  delete(id: SessionId): Promise<void> {
++    return this.coordinator.delete(id)
++  }
++
+   // One method serves both public `list` and the backend hook; delegating it to
+   // the coordinator would call this hook recursively.
+ 
+@@ -208,6 +212,26 @@ export class SqliteSessionPersistence extends SessionPersistence implements Pers
+     return this.readPrefix(id, signal)
+   }
+ 
++  /**
++   * Remove one session's rows in ONE transaction: the sessions row plus every
++   * event row, or roll back entirely. A session with no row resolves without
++   * writing.
++   */
++  async deleteStored(id: SessionId, signal?: AbortSignal): Promise<void> {
++    signal?.throwIfAborted()
++    await this.ready
++    signal?.throwIfAborted()
++    this.db.exec('BEGIN')
++    try {
++      this.db.prepare('DELETE FROM events WHERE session_id = ?').run(id)
++      this.db.prepare('DELETE FROM sessions WHERE id = ?').run(id)
++      this.db.exec('COMMIT')
++    } catch (error) {
++      this.db.exec('ROLLBACK')
++      throw error
++    }
++  }
++
+   /** Read one row's revision without loading its events. */
+   async readStoredRevision(id: SessionId, signal?: AbortSignal): Promise<PersistenceRevision | undefined> {
+     signal?.throwIfAborted()
+diff --git a/packages/session/session-persistence/src/coordinator.ts b/packages/session/session-persistence/src/coordinator.ts
+index eb5f9714c4..69494e70a2 100644
+--- a/packages/session/session-persistence/src/coordinator.ts
++++ b/packages/session/session-persistence/src/coordinator.ts
+@@ -183,6 +183,14 @@ export interface PersistenceBackend<TornMarker = unknown> {
+    */
+   appendBatch(meta: SessionHeader, events: readonly SessionEvent[], isMaterialized: boolean): Promise<void>
+ 
++  /**
++   * Durably remove one session's stored artifact. A session with no artifact
++   * resolves without writing. Returns once removal is durable.
++   * @param id - the persisted session to delete.
++   * @param signal - optional cancellation for backend delete work.
++   */
++  deleteStored(id: SessionId, signal?: AbortSignal): Promise<void>
++
+   /**
+    * Make a crash repair durable: truncate the torn tail (iff
+    * `tornMarker !== undefined`) and append `closers` (iff any). NOT required to
+@@ -999,6 +1007,29 @@ export class PersistenceCoordinator<TornMarker = unknown> {
+ 
+   // Listing is a direct backend read and needs no coordinator state.
+ 
++  /**
++   * Durably delete one session's stored log. Refuses while the session is
++   * live (attached to the session store) or its buffered tail is still
++   * draining; an absent session resolves without writing. Runs on the id's
++   * serialization chain, so it cannot interleave with a concurrent append,
++   * repair, or preparation commit: a queued delete waits for them, and one
++   * that runs first invalidates any cached preparation and drops the
++   * in-memory state, so a later {@link create} may reuse the id.
++   * @param id - the persisted session to delete.
++   * @returns resolution after the artifact is gone.
++   */
++  delete(id: SessionId): Promise<void> {
++    return this.serialize(id, async () => {
++      await this.waitForRetirement(id)
++      if (this.ctx.sessions.get(id) !== undefined) {
++        throw new Error(`cannot delete session "${id}" while it is live`)
++      }
++      this.preparations.invalidate(id)
++      await this.backend.deleteStored(id)
++      this.states.delete(id)
++    })
++  }
++
+   // --- per-id serialization + adoption helpers ---
+ 
+   /**
+diff --git a/packages/session/session-persistence/src/index.ts b/packages/session/session-persistence/src/index.ts
+index d579dc46d9..3fd2b007b2 100644
+--- a/packages/session/session-persistence/src/index.ts
++++ b/packages/session/session-persistence/src/index.ts
+@@ -227,6 +227,19 @@ export abstract class SessionPersistence extends Service {
+    */
+   abstract list(signal?: AbortSignal): Promise<SessionHeader[]>
+ 
++  /**
++   * Durably delete one session's stored log. The session must not be live
++   * (attached to the session store) and must not have a buffered tail still
++   * draining; both refuse with an error naming the session. Deleting an
++   * absent session resolves without writing. Implementations drop the
++   * backend artifact and any in-memory identity state for the id, so a later
++   * {@link list} no longer reports it and a later {@link create} may reuse
++   * the id.
++   * @param id - the persisted session to delete.
++   * @returns resolution after the artifact is gone.
++   */
++  abstract delete(id: SessionId): Promise<void>
++
+   /**
+    * List materialized sessions with cheap per-log change tokens.
+    *
+diff --git a/packages/session/session-persistence/tests/coordinator-contract.ts b/packages/session/session-persistence/tests/coordinator-contract.ts
+index 8633faa886..00f707ddbb 100644
+--- a/packages/session/session-persistence/tests/coordinator-contract.ts
++++ b/packages/session/session-persistence/tests/coordinator-contract.ts
+@@ -1301,6 +1301,65 @@ export function runCoordinatorContract(name: string, makeFixture: () => Promise<
+       }
+     })
+ 
++    it('delete of an absent session resolves without writing', async () => {
++      const fix = await makeFixture()
++      const { ctx, fiber } = await freshCtx(fix)
++      try {
++        await ctx.sessionPersistence.delete(SessionId('nope'))
++        expect(await ctx.sessionPersistence.list()).toEqual([])
++      } finally {
++        await fiber.dispose()
++        await fix.cleanup()
++      }
++    })
++
++    it('delete removes the log and lazy state, dropping the id from list and releasing it for reuse', async () => {
++      const fix = await makeFixture()
++      const { ctx, fiber } = await freshCtx(fix)
++      try {
++        const m = meta('del', WORK)
++        await ctx.sessionPersistence.create(m)
++        await ctx.sessionPersistence.append(m.id, oneTurnLog())
++        expect((await ctx.sessionPersistence.list()).map(header => header.id)).toEqual([m.id])
++
++        await ctx.sessionPersistence.delete(m.id)
++        expect(await ctx.sessionPersistence.list()).toEqual([])
++        await expect(ctx.sessionPersistence.load(m.id)).rejects.toThrow(/not found/)
++
++        // The id is reusable after the delete: a fresh create materializes again.
++        await ctx.sessionPersistence.create(meta('del', WORK))
++        await ctx.sessionPersistence.append(m.id, oneTurnLog())
++        expect((await ctx.sessionPersistence.load(m.id)).events).toHaveLength(6)
++      } finally {
++        await fiber.dispose()
++        await fix.cleanup()
++      }
++    })
++
++    it('delete refuses a live session and succeeds once its tail has drained', async () => {
++      const fix = await makeFixture()
++      const { ctx, fiber } = await freshCtx(fix)
++      let session!: Session
++      const sessionFiber = await ctx.plugin(Object.assign((inner: Context) => {
++        session = inner.sessions.create(SessionId('live-del'), { meta: { cwd: WORK } })
++      }, { inject: ['sessions'] }))
++      try {
++        session.append('turn/start', { turn: 1 })
++        await ctx.sessions.flush(session)
++        await expect(ctx.sessionPersistence.delete(session.id)).rejects.toThrow(/while it is live/)
++
++        await sessionFiber.dispose()
++        await vi.waitFor(async () => {
++          await ctx.sessionPersistence.delete(session.id)
++        })
++        expect(await ctx.sessionPersistence.list()).toEqual([])
++      } finally {
++        await sessionFiber.dispose()
++        await fiber.dispose()
++        await fix.cleanup()
++      }
++    })
++
+     it('create rejects a duplicate id (in memory and on a persisted log)', async () => {
+       const fix = await makeFixture()
+       const first = await freshCtx(fix)
+diff --git a/packages/session/session-persistence/tests/persistence.spec.ts b/packages/session/session-persistence/tests/persistence.spec.ts
+index 50ad798e04..cb1c3e3d50 100644
+--- a/packages/session/session-persistence/tests/persistence.spec.ts
++++ b/packages/session/session-persistence/tests/persistence.spec.ts
+@@ -118,6 +118,10 @@ class MemoryPersistence extends SessionPersistence implements PersistenceBackend
+     return this.coordinator.readFrom(id, fromSeq, signal)
+   }
+ 
++  delete(id: SessionId): Promise<void> {
++    return this.coordinator.delete(id)
++  }
++
+   // --- PersistenceBackend hooks (the Map storage primitives) ---
+ 
+   // A Map-backed store has no torn tails, so `tornMarker` is never set.
+@@ -161,6 +165,11 @@ class MemoryPersistence extends SessionPersistence implements PersistenceBackend
+     if (closers.length > 0) entry.events.push(...structuredClone(closers) as SessionEvent[])
+   }
+ 
++  deleteStored(id: SessionId): Promise<void> {
++    this.store.delete(id)
++    return Promise.resolve()
++  }
++
+   async list(signal?: AbortSignal): Promise<SessionHeader[]> {
+     signal?.throwIfAborted()
+     return [...this.store.values()].map(e => structuredClone(e.meta))
+@@ -228,6 +237,11 @@ class ControlledBackend implements PersistenceBackend<never> {
+     if (entry !== undefined) entry.events.push(...structuredClone(closers) as SessionEvent[])
+   }
+ 
++  deleteStored(id: SessionId): Promise<void> {
++    this.store.delete(id)
++    return Promise.resolve()
++  }
++
+   async list(): Promise<SessionHeader[]> {
+     return [...this.store.values()].map(entry => structuredClone(entry.meta))
+   }
+diff --git a/packages/test-support/client-runtime/src/workspaces.ts b/packages/test-support/client-runtime/src/workspaces.ts
+index 4f6b2122cb..9851c9910e 100644
+--- a/packages/test-support/client-runtime/src/workspaces.ts
++++ b/packages/test-support/client-runtime/src/workspaces.ts
+@@ -212,4 +212,38 @@ export class TestWorkspaces implements IWorkspaces {
+       draft.archivedSessionIds = [...draft.archivedSessionIds, sessionId]
+     })
+   }
++
++  /**
++   * Unarchive a session (recorded). The default mirrors the production
++   * face's observable effect: the id leaves the list state's archive set.
++   * @param sessionId - session to unarchive.
++   */
++  async unarchiveSession(sessionId: SessionId): Promise<void> {
++    this.calls.push({ method: 'unarchiveSession', args: [sessionId] })
++    const stub = this.stubs.get('unarchiveSession')
++    if (stub !== undefined) {
++      await (stub(sessionId) as Promise<void>)
++      return
++    }
++    await this.update((draft) => {
++      draft.archivedSessionIds = draft.archivedSessionIds.filter(id => id !== sessionId)
++    })
++  }
++
++  /**
++   * Delete a session (recorded). The default mirrors the production face's
++   * observable effect: the id leaves the list state's archive set.
++   * @param sessionId - session to delete.
++   */
++  async deleteSession(sessionId: SessionId): Promise<void> {
++    this.calls.push({ method: 'deleteSession', args: [sessionId] })
++    const stub = this.stubs.get('deleteSession')
++    if (stub !== undefined) {
++      await (stub(sessionId) as Promise<void>)
++      return
++    }
++    await this.update((draft) => {
++      draft.archivedSessionIds = draft.archivedSessionIds.filter(id => id !== sessionId)
++    })
++  }
+ }
+diff --git a/packages/workspace/workspace/src/index.ts b/packages/workspace/workspace/src/index.ts
+index 87edb28cad..48c7a573d3 100644
+--- a/packages/workspace/workspace/src/index.ts
++++ b/packages/workspace/workspace/src/index.ts
+@@ -39,19 +39,35 @@ export function WorkspaceId(id: string): WorkspaceId {
+ }
+ 
+ /**
+- * An archiveSession request named a session neither live nor in session
++ * An archive/delete request named a session neither live nor in session
+  * persistence — a definite miss only; storage faults propagate as themselves.
+  */
+ export class WorkspaceUnknownSessionError extends Error {
+   /**
+    * @param sessionId - The unknown session id.
++   * @param action - The refused operation, for the message.
+    */
+-  constructor(readonly sessionId: SessionId) {
+-    super(`cannot archive session '${sessionId}': live sessions and session persistence hold no such session`)
++  constructor(readonly sessionId: SessionId, action: 'archive' | 'delete' = 'archive') {
++    super(`cannot ${action} session '${sessionId}': live sessions and session persistence hold no such session`)
+     this.name = 'WorkspaceUnknownSessionError'
+   }
+ }
+ 
++/**
++ * A deleteSession request named a session currently attached to the live
++ * session store. Deleting a live session's log underneath its running owner
++ * would corrupt the conversation, so deletion refuses while it is live.
++ */
++export class WorkspaceSessionLiveError extends Error {
++  /**
++   * @param sessionId - The live session id.
++   */
++  constructor(readonly sessionId: SessionId) {
++    super(`cannot delete session '${sessionId}': the session is live; close it before deleting`)
++    this.name = 'WorkspaceSessionLiveError'
++  }
++}
++
+ /** A workspace reorder named a source or anchor absent from the durable registry order. */
+ export class WorkspaceOrderInvalidError extends Error {
+   /**
+@@ -254,6 +270,82 @@ export class WorkspaceRegistry extends Service {
+     })
+   }
+ 
++  /**
++   * Unarchive one session durably: remove it from the registry-global archive
++   * set. The session's workspace accounting slot was retained by archiving,
++   * so unarchiving restores its previous position on every grouping surface.
++   * A session outside the archive set resolves without writing — the
++   * existence of the session itself is not consulted, so a stale archived id
++   * whose log vanished can always be cleaned up through this method.
++   * @param sessionId - The session to unarchive.
++   * @returns resolution after durability.
++   */
++  unarchiveSession(sessionId: SessionId): Promise<void> {
++    return this.enqueueOperation(async () => {
++      const state = this.requireState()
++      if (!state.archivedSessionIds.includes(sessionId)) return
++      await this.setState({
++        ...state,
++        archivedSessionIds: state.archivedSessionIds.filter(id => id !== sessionId),
++      })
++    })
++  }
++
++  /**
++   * Delete one session durably: remove its stored log through session
++   * persistence, drop it from the header index, the registry-global archive
++   * set, and every workspace's session accounting. A session attached to the
++   * live session store refuses with {@link WorkspaceSessionLiveError}; a
++   * session neither live nor in session persistence fails with
++   * {@link WorkspaceUnknownSessionError}. The log deletion is the commit
++   * point — the header-index and accounting cleanup that follows it is
++   * best-effort and logs failures, because a reportable failure after the
++   * log is gone would only invite a doomed retry.
++   * @param sessionId - The session to delete.
++   * @returns resolution after the log deletion committed.
++   */
++  deleteSession(sessionId: SessionId): Promise<void> {
++    return this.enqueueOperation(async () => {
++      if (this.ctx.get('sessions')?.get(sessionId) !== undefined) {
++        throw new WorkspaceSessionLiveError(sessionId)
++      }
++      if (!(await this.sessionKnown(sessionId))) {
++        throw new WorkspaceUnknownSessionError(sessionId, 'delete')
++      }
++      // The irreversible part first: once the stored log is gone, the
++      // registry-side cleanup below can only make the world more consistent.
++      await this.ctx.sessionPersistence.delete(sessionId)
++      this.headers.delete(sessionId)
++      this.sessionPaths.delete(sessionId)
++      this.invalidSessionPaths.delete(sessionId)
++      const state = this.requireState()
++      const archivedSessionIds = state.archivedSessionIds.filter(id => id !== sessionId)
++      if (archivedSessionIds.length !== state.archivedSessionIds.length) {
++        try {
++          await this.setState({ ...state, archivedSessionIds })
++        } catch (error) {
++          this.ctx.logger.warn(
++            `session '${sessionId}' was deleted but its archive-set entry could not be cleared: ${String(error)}`,
++          )
++        }
++      }
++      // Only one workspace may account a session; detaching from every entity
++      // is still safe (a no-op write is aborted by the unchanged sentinel),
++      // and `mutate` additionally prunes accounts whose header index entry is
++      // gone, so an unaccounted-in-projection lingering raw account is
++      // cleared by the same pass.
++      for (const entity of this.entities.values()) {
++        try {
++          await entity.detachSession(sessionId)
++        } catch (error) {
++          this.ctx.logger.warn(
++            `session '${sessionId}' was deleted but workspace '${entity.id}' still accounts it: ${String(error)}`,
++          )
++        }
++      }
++    })
++  }
++
+   /**
+    * Whether a session is live, header-indexed, or present in a fresh
+    * persistence listing. Only a definite miss returns false — a failing
+diff --git a/packages/workspace/workspace/tests/workspace.spec.ts b/packages/workspace/workspace/tests/workspace.spec.ts
+index 22900c7649..d5be5cc889 100644
+--- a/packages/workspace/workspace/tests/workspace.spec.ts
++++ b/packages/workspace/workspace/tests/workspace.spec.ts
+@@ -48,7 +48,8 @@ async function harness(options: HarnessOptions = {}) {
+   const list = vi.fn(async () => listed)
+   const load = vi.fn(() => { throw new Error('event bodies must not be loaded') })
+   const inspect = vi.fn(() => { throw new Error('event bodies must not be inspected') })
+-  ctx.provide('sessionPersistence', { list, load, inspect } as never)
++  const del = vi.fn(async (id: SessionId) => { listed = listed.filter(header => header.id !== id) })
++  ctx.provide('sessionPersistence', { list, load, inspect, delete: del } as never)
+ 
+   if (options.sessionStore === true) {
+     await ctx.plugin(SessionStore)
+@@ -75,6 +76,7 @@ async function harness(options: HarnessOptions = {}) {
+     list,
+     load,
+     inspect,
++    del,
+     setSessions: (headers: SessionHeader[]) => { listed = headers },
+   }
+ }
+@@ -941,4 +943,75 @@ describe('registry-global session archive', () => {
+     const upgraded = await harness({ pool: legacy })
+     expect(upgraded.registry.archivedSessionIds).toEqual([])
+   })
++
++  it('unarchives durably and idempotently, restoring the retained accounting slot', async () => {
++    const dir = await makeDir('unarchive-home')
++    const result = await harness({ sessions: [header('s1', dir, 100)] })
++    const workspace = result.registry.list()[0]!
++    await result.registry.archiveSession(SessionId('s1'))
++    expect(result.registry.archivedSessionIds).toEqual(['s1'])
++    // Archiving retained the account slot; unarchiving restores the position.
++    expect(workspace.sessionIds).toContain('s1')
++
++    await result.registry.unarchiveSession(SessionId('s1'))
++    expect(result.registry.archivedSessionIds).toEqual([])
++    expect(workspace.sessionIds).toContain('s1')
++    expect(storedState(result.pool).archivedSessionIds).toEqual([])
++    const changesAfter = result.changes.filter(change => change.table === '').length
++
++    // The idempotent repeat neither rewrites the medium nor emits a change.
++    await result.registry.unarchiveSession(SessionId('s1'))
++    expect(result.registry.archivedSessionIds).toEqual([])
++    expect(result.changes.filter(change => change.table === '').length).toBe(changesAfter)
++  })
++
++  it('unarchives an id outside the set without consulting existence, cleaning stale ids', async () => {
++    const result = await harness({ sessions: [] })
++    await result.registry.unarchiveSession(SessionId('ghost'))
++    expect(result.registry.archivedSessionIds).toEqual([])
++    expect(result.changes.filter(change => change.table === '').length).toBe(0)
++  })
++
++  it('deletes a session durably: log, header index, archive set, and accounting', async () => {
++    const dir = await makeDir('delete-home')
++    const result = await harness({ sessions: [header('s1', dir, 100), header('s2', dir, 200)] })
++    const workspace = result.registry.list()[0]!
++    await result.registry.archiveSession(SessionId('s1'))
++
++    await result.registry.deleteSession(SessionId('s1'))
++    expect(result.del).toHaveBeenCalledWith(SessionId('s1'))
++    expect(result.registry.archivedSessionIds).toEqual([])
++    expect(workspace.sessionIds).toEqual(['s2'])
++    expect(storedState(result.pool).archivedSessionIds).toEqual([])
++    // The header index forgot the session: a re-archive reports a definite miss.
++    await expect(result.registry.archiveSession(SessionId('s1')))
++      .rejects.toThrow(/cannot archive session 's1'/)
++  })
++
++  it('deletes a session whose log vanished out-of-band, cleaning the stale archive entry', async () => {
++    const dir = await makeDir('delete-stale')
++    const result = await harness({ sessions: [header('s1', dir, 100)] })
++    await result.registry.archiveSession(SessionId('s1'))
++    // The header index still knows s1 from startup, so the delete proceeds
++    // even though the log is already gone.
++    result.setSessions([])
++
++    await result.registry.deleteSession(SessionId('s1'))
++    expect(result.registry.archivedSessionIds).toEqual([])
++    expect(result.del).toHaveBeenCalledWith(SessionId('s1'))
++  })
++
++  it('refuses to delete live and unknown sessions without writing', async () => {
++    const dir = await makeDir('delete-live')
++    const result = await harness({
++      sessions: [header('s1', dir, 100)],
++      liveSessions: [header('live', dir, 300)],
++    })
++    await expect(result.registry.deleteSession(SessionId('live')))
++      .rejects.toThrow(/the session is live/)
++    await expect(result.registry.deleteSession(SessionId('ghost')))
++      .rejects.toThrow(/cannot delete session 'ghost'/)
++    expect(result.del).not.toHaveBeenCalled()
++    expect(storedState(result.pool).archivedSessionIds).toEqual([])
++  })
+ })

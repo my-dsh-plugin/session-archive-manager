@@ -13,37 +13,42 @@
 
 ## 依赖要求
 
-- 需要包含 `workspace.unarchiveSession` 与 `workspace.deleteSession` RPC、以及运行时 `workspaces.unarchiveSession` / `workspaces.deleteSession` 动作的 DeepSeek Harness 版本。本插件只提供界面，全部操作依赖这些核心 API。
-- 需要把插件接入 web profile（见下）。
+本插件只提供界面，全部操作依赖核心的 `workspace.unarchiveSession` 与 `workspace.deleteSession` RPC、以及运行时 `workspaces.unarchiveSession` / `workspaces.deleteSession` 动作。Harness 目前尚未内置这些 API（也没有上游发布渠道），所以**现阶段必须使用 deepseek-harness 源码 checkout 并应用本仓库随附的补丁**。缺少这些 API 时，设置页会以只读方式显示归档列表并提示升级。
 
 ## 安装
 
-1. 克隆到 harness checkout 旁边并安装：
+### 1. 给 Harness 核心打补丁（在 API 进入上游之前必需）
 
-   ```sh
-   git clone https://github.com/my-dsh-plugin/session-archive-manager.git
-   pnpm install
-   ```
+在本仓库目录下，对着你的 deepseek-harness checkout 执行（补丁固定基于上游提交 `47f943859b`；其他提交可能需要 `git apply -3` 手工解决）：
 
-2. 在 web profile 的 `package.json` dependencies 中链接：
+```sh
+node scripts/apply-patch.mjs /path/to/deepseek-harness
+cd /path/to/deepseek-harness
+npm run build:lib:host
+npm run build:lib:client
+```
 
-   ```json
-   "dependencies": {
-     "dsh-session-archive-manager": "link:/path/to/session-archive-manager"
-   }
-   ```
+补丁文件为 `patches/dsh-core-unarchive-delete.patch`，新增两个 workspace RPC、session-persistence 的 delete 能力（JSONL/SQLite 后端）、客户端 runtime 动作及配套测试。纯增量改动，不改变任何现有行为。
 
-3. 在 profile 的 `dsh.profile.bundles` 列表中加入：
+### 2. 把插件链接进你的 web profile
 
-   ```json
-   "dsh": {
-     "profile": {
-       "bundles": ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app", "dsh-session-archive-manager"]
-     }
-   }
-   ```
+```json
+"dependencies": {
+  "dsh-session-archive-manager": "link:/path/to/session-archive-manager"
+}
+```
 
-4. 重启 Harness。设置页中「插件」之后会出现「归档会话」入口。
+```json
+"dsh": {
+  "profile": {
+    "bundles": ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app", "dsh-session-archive-manager"]
+  }
+}
+```
+
+### 3. 重启 Harness
+
+设置页「插件」之后会出现「归档会话」入口。如果页面显示只读提示，说明核心补丁没有生效。
 
 ## 开发
 
