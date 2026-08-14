@@ -44,6 +44,18 @@
   flex: 1;
 }
 
+.groupTitle {
+  margin: 4px 0 6px;
+  font-size: 12px;
+  line-height: 18px;
+  font-weight: 500;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.group + .group {
+  margin-top: 16px;
+}
+
 .list {
   display: flex;
   flex-direction: column;

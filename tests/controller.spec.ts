@@ -10,7 +10,7 @@ import type { WorkspaceView } from '@deepseek-ai/dsh-api-remotes/client'
 // The client-side summary shape, exactly as the runtime store carries it.
 import type { SessionListState, SessionSummary, WorkspaceListState } from '@deepseek-ai/dsh-client-runtime/client'
 import {
-  assembleRows, createArchiveSource, runActions, titleOf,
+  assembleRows, createArchiveSource, groupRows, runActions, titleOf,
 } from '../src/client/section-controller.ts'
 
 /** A minimal controllable observable feed with the store's subscribe shape. */
@@ -73,11 +73,13 @@ describe('assembleRows', () => {
       title: 'hello',
       updatedAt: 5,
       blank: false,
+      workspaceId: 'w1',
       workspaceTitle: 'w1',
     })
     expect(rows[1]).toMatchObject({
       sessionId: sid('s2'),
       title: 's2',
+      workspaceId: undefined,
       workspaceTitle: undefined,
     })
     // A stale id with no summary still renders as an actionable row.
@@ -85,6 +87,7 @@ describe('assembleRows', () => {
       sessionId: sid('ghost'),
       title: undefined,
       updatedAt: 0,
+      workspaceId: undefined,
       workspaceTitle: undefined,
     })
   })
@@ -93,6 +96,47 @@ describe('assembleRows', () => {
     expect(titleOf(summary('s1', { displayTitle: 'hello' }))).toBe('hello')
     expect(titleOf({ id: sid('s2'), title: 'named' } as SessionSummary)).toBe('named')
     expect(titleOf({ id: sid('s3') } as SessionSummary)).toBeUndefined()
+  })
+})
+
+describe('groupRows', () => {
+  const row = (id: string, workspaceId?: string): ReturnType<typeof assembleRows>[number] => ({
+    sessionId: sid(id),
+    title: id,
+    cwd: undefined,
+    updatedAt: 1,
+    blank: false,
+    running: false,
+    workspaceId: workspaceId as ReturnType<typeof assembleRows>[number]['workspaceId'],
+    workspaceTitle: workspaceId,
+  })
+
+  it('groups by workspace id in registry order and collects the ungrouped bucket last', () => {
+    const workspaces = [workspace('w2', ['s3', 's4']), workspace('w1', ['s1'])]
+    const groups = groupRows(
+      [row('s1', 'w1'), row('s2'), row('s3', 'w2'), row('s4', 'w2')],
+      workspaces,
+    )
+    expect(groups.map(group => group.workspaceId)).toEqual(['w2', 'w1', undefined])
+    expect(groups[0]?.rows.map(r => r.sessionId)).toEqual([sid('s3'), sid('s4')])
+    expect(groups[1]?.rows.map(r => r.sessionId)).toEqual([sid('s1')])
+    expect(groups[2]?.workspaceTitle).toBeUndefined()
+    expect(groups[2]?.rows.map(r => r.sessionId)).toEqual([sid('s2')])
+  })
+
+  it('keeps same-titled workspaces in separate groups (grouping is by id)', () => {
+    const workspaces = [
+      workspace('w1', ['s1'], 'same'),
+      workspace('w2', ['s2'], 'same'),
+    ]
+    const groups = groupRows([row('s2', 'w2'), row('s1', 'w1')], workspaces)
+    expect(groups.map(group => group.workspaceId)).toEqual(['w1', 'w2'])
+    expect(groups[0]?.rows.map(r => r.sessionId)).toEqual([sid('s1')])
+    expect(groups[1]?.rows.map(r => r.sessionId)).toEqual([sid('s2')])
+  })
+
+  it('produces no groups from empty rows', () => {
+    expect(groupRows([], [workspace('w1', [])])).toEqual([])
   })
 })
 

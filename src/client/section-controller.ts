@@ -7,7 +7,7 @@
  * @module dsh-session-archive-manager/client/section-controller
  */
 
-import type { SessionId, WorkspaceView } from '@deepseek-ai/dsh-api-remotes/client'
+import type { SessionId, WorkspaceId, WorkspaceView } from '@deepseek-ai/dsh-api-remotes/client'
 // The CLIENT-side summary shape the runtime store carries (id/displayTitle/
 // projectionValues) — NOT the wire shape (sessionId/projections) the host
 // sends. Reading the wire fields off the store's rows yields no titles.
@@ -31,7 +31,9 @@ export interface ArchiveRow {
   blank: boolean
   /** Whether the session has an attached running agent. */
   running: boolean
-  /** Title of the workspace that accounts the session, when accounted. */
+  /** The accounting workspace id, when a workspace accounts the session. */
+  workspaceId: WorkspaceId | undefined
+  /** The accounting workspace display title, when accounted. */
   workspaceTitle: string | undefined
 }
 
@@ -40,6 +42,8 @@ export interface ArchiveSnapshot {
   status: 'loading' | 'ready'
   /** Archived rows in archive order. */
   rows: readonly ArchiveRow[]
+  /** Rows grouped by accounting workspace, in registry order; ungrouped last. */
+  groups: readonly ArchiveGroup[]
 }
 
 /** Observable source the renderer binds as a snapshot hook. */
@@ -97,9 +101,57 @@ export function assembleRows(
           blank: summary.blank,
           running: summary.running,
         },
+      workspaceId: workspace?.workspaceId,
       workspaceTitle: workspace?.title,
     }
   })
+}
+
+/** One workspace group of archived rows; the ungrouped bucket has no id or title. */
+export interface ArchiveGroup {
+  /** The accounting workspace id; undefined for unaccounted sessions. */
+  workspaceId: WorkspaceId | undefined
+  /** The workspace display title; undefined for the ungrouped bucket. */
+  workspaceTitle: string | undefined
+  /** Rows in this group, in archive order. */
+  rows: readonly ArchiveRow[]
+}
+
+/**
+ * Group flat archive rows by their accounting workspace, in workspace
+ * registry order; sessions no workspace accounts fall into one final
+ * ungrouped bucket. Grouping is by workspace id, never by title (duplicate
+ * titles are legal), so two same-named workspaces stay separate groups.
+ * @param rows - flat archived rows in archive order.
+ * @param workspaces - workspace views in registry display order.
+ * @returns the groups; empty rows produce no groups.
+ */
+export function groupRows(
+  rows: readonly ArchiveRow[],
+  workspaces: readonly WorkspaceView[],
+): ArchiveGroup[] {
+  const byWorkspace = new Map<WorkspaceId, ArchiveRow[]>()
+  const ungrouped: ArchiveRow[] = []
+  for (const row of rows) {
+    if (row.workspaceId === undefined) {
+      ungrouped.push(row)
+      continue
+    }
+    const list = byWorkspace.get(row.workspaceId)
+    if (list === undefined) byWorkspace.set(row.workspaceId, [row])
+    else list.push(row)
+  }
+  const groups: ArchiveGroup[] = []
+  for (const workspace of workspaces) {
+    const list = byWorkspace.get(workspace.workspaceId)
+    if (list === undefined) continue
+    byWorkspace.delete(workspace.workspaceId)
+    groups.push({ workspaceId: workspace.workspaceId, workspaceTitle: workspace.title, rows: list })
+  }
+  if (ungrouped.length > 0) {
+    groups.push({ workspaceId: undefined, workspaceTitle: undefined, rows: ungrouped })
+  }
+  return groups
 }
 
 /** Whether two row lists are equal field-by-field (archive sets are small). */
@@ -114,8 +166,15 @@ function rowsEqual(left: readonly ArchiveRow[], right: readonly ArchiveRow[]): b
       && row.updatedAt === other.updatedAt
       && row.blank === other.blank
       && row.running === other.running
+      && row.workspaceId === other.workspaceId
       && row.workspaceTitle === other.workspaceTitle
   })
+}
+
+/** Whether two group lists carry the same workspace sequence (rows are compared separately). */
+function groupsEqual(left: readonly ArchiveGroup[], right: readonly ArchiveGroup[]): boolean {
+  return left.length === right.length
+    && left.every((group, index) => group.workspaceId === right[index]?.workspaceId)
 }
 
 /**
@@ -136,16 +195,20 @@ export function createArchiveSource(
     // lookup table is a type-only cast — the keys are plain strings at runtime.
     const byId = session.byId as unknown as Readonly<Record<string, SessionSummary>>
     const rows = assembleRows(workspace.archivedSessionIds, byId, workspace.items)
+    const groups = groupRows(rows, workspace.items)
     const ready = workspace.phase === 'ready' && session.phase === 'ready'
-    return { status: ready ? 'ready' : 'loading', rows }
+    return { status: ready ? 'ready' : 'loading', rows, groups }
   }
   let snapshot = build()
   const listeners = new Set<() => void>()
   const rebuild = (): void => {
     const next = build()
-    // A feed update that leaves the derived rows unchanged keeps the prior
-    // snapshot reference, so renderers do not re-render on no-op refreshes.
-    if (next.status === snapshot.status && rowsEqual(next.rows, snapshot.rows)) return
+    // A feed update that leaves the derived rows and group sequence unchanged
+    // keeps the prior snapshot reference, so renderers do not re-render on
+    // no-op refreshes.
+    if (next.status === snapshot.status
+      && rowsEqual(next.rows, snapshot.rows)
+      && groupsEqual(next.groups, snapshot.groups)) return
     snapshot = next
     for (const listener of [...listeners]) listener()
   }

@@ -208,42 +208,49 @@ export function ArchiveManagerSection(props: ArchiveManagerSectionProps): React.
               </div>
             )}
 
-            <ul className={css.list}>
-              {rows.map(row => {
-                const checked = selected.has(row.sessionId)
-                return (
-                  <li key={String(row.sessionId)} className={css.row}>
-                    <input
-                      type="checkbox"
-                      className={css.checkbox}
-                      checked={checked}
-                      aria-label={row.title ?? row.sessionId}
-                      disabled={busy}
-                      onChange={event => { toggle(row.sessionId, event.target.checked) }}
-                    />
-                    <span className={css.cellTitle}>
-                      <span className={css.name} title={row.sessionId}>
-                        {row.title === undefined ? (row.updatedAt === 0 ? t('missing') : t('untitled')) : row.title}
-                      </span>
-                      <span className={css.meta}>
-                        {[row.workspaceTitle, row.cwd].filter(Boolean).join(' · ') || String(row.sessionId)}
-                      </span>
-                    </span>
-                    <span>
-                      {row.running
-                        ? <span className={`${css.badge} ${css.badgeRunning}`}>{t('running')}</span>
-                        : null}
-                      {row.blank && !row.running
-                        ? <span className={`${css.badge} ${css.badgeBlank}`}>{t('blank')}</span>
-                        : null}
-                    </span>
-                    <span className={css.updated}>
-                      {row.updatedAt === 0 ? '' : new Date(row.updatedAt).toLocaleString()}
-                    </span>
-                  </li>
-                )
-              })}
-            </ul>
+            {snapshot.groups.map(group => (
+              <section key={group.workspaceId ?? '\u0000ungrouped'} className={css.group}>
+                <h3 className={css.groupTitle}>
+                  {group.workspaceTitle ?? t('ungrouped')}
+                </h3>
+                <ul className={css.list}>
+                  {group.rows.map(row => {
+                    const checked = selected.has(row.sessionId)
+                    return (
+                      <li key={String(row.sessionId)} className={css.row}>
+                        <input
+                          type="checkbox"
+                          className={css.checkbox}
+                          checked={checked}
+                          aria-label={row.title ?? row.sessionId}
+                          disabled={busy}
+                          onChange={event => { toggle(row.sessionId, event.target.checked) }}
+                        />
+                        <span className={css.cellTitle}>
+                          <span className={css.name} title={row.sessionId}>
+                            {row.title === undefined ? (row.updatedAt === 0 ? t('missing') : t('untitled')) : row.title}
+                          </span>
+                          <span className={css.meta}>
+                            {row.cwd ?? String(row.sessionId)}
+                          </span>
+                        </span>
+                        <span>
+                          {row.running
+                            ? <span className={`${css.badge} ${css.badgeRunning}`}>{t('running')}</span>
+                            : null}
+                          {row.blank && !row.running
+                            ? <span className={`${css.badge} ${css.badgeBlank}`}>{t('blank')}</span>
+                            : null}
+                        </span>
+                        <span className={css.updated}>
+                          {row.updatedAt === 0 ? '' : new Date(row.updatedAt).toLocaleString()}
+                        </span>
+                      </li>
+                    )
+                  })}
+                </ul>
+              </section>
+            ))}
           </>
         )}
 
