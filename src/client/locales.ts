@@ -30,6 +30,7 @@ export const zh: { [Key in Dictionary]: string } = {
   blank: '空白',
   done: '操作完成',
   failed: '{count} 个会话操作失败',
+  failedLive: '（其中 {count} 个正在运行，停止回合后重试）',
   failedDetail: '失败：{message}',
   actionError: '操作失败：{message}',
 }
@@ -61,6 +62,7 @@ export const en = {
   done: 'Done',
   failed: '{count} sessions failed',
   failedDetail: 'Failed: {message}',
+  failedLive: ' ({count} are running; stop their turns and retry)',
   actionError: 'Action failed: {message}',
 }
 

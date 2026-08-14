@@ -196,4 +196,19 @@ describe('runActions', () => {
     const result = await runActions([sid('a')], async () => {})
     expect(result.failed).toEqual([])
   })
+
+  it('extracts the RPC code from runtime service errors so the page can categorize', async () => {
+    const result = await runActions([sid('a'), sid('b')], async (sessionId) => {
+      if (String(sessionId) === 'a') {
+        throw new Error(
+          "session delete failed: session-live: cannot delete session 'a': the session is running; stop it before deleting",
+        )
+      }
+      throw new Error("session delete failed: session-not-found: cannot delete session 'b'")
+    })
+    expect(result.failed).toEqual([
+      { sessionId: sid('a'), message: expect.stringContaining('session-live'), code: 'session-live' },
+      { sessionId: sid('b'), message: expect.stringContaining('session-not-found'), code: 'session-not-found' },
+    ])
+  })
 })
