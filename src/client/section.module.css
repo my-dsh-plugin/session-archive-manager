@@ -48,7 +48,7 @@
 }
 
 .groupTitle {
-  margin: 4px 0 6px;
+  margin: 2px 0 4px;
   font-size: 12px;
   line-height: 18px;
   font-weight: 500;
@@ -56,7 +56,7 @@
 }
 
 .group + .group {
-  margin-top: 16px;
+  margin-top: 12px;
 }
 
 .list {
@@ -79,8 +79,8 @@
    * centered column, which would leave dead space beside it. */
   grid-template-columns: auto minmax(0, 1fr) auto auto;
   align-items: center;
-  gap: 10px;
-  padding: 10px 12px;
+  gap: 8px;
+  padding: 7px 10px;
   border-top: 1px solid var(--dsw-alias-border-l2);
 }
 
@@ -102,7 +102,7 @@
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 1px;
 }
 
 .name {
