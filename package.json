@@ -11,8 +11,7 @@
   "scripts": {
     "build": "tsc -b && tsdown && tsdown --config tsdown.client.config.ts",
     "test": "vitest run",
-    "typecheck": "tsc -b --pretty false && tsc -p tsconfig.client.json --pretty false",
-    "prepare": "tsdown --config tsdown.prepare.config.ts"
+    "typecheck": "tsc -b --pretty false && tsc -p tsconfig.client.json --pretty false"
   },
   "main": "lib/index.js",
   "types": "lib/types/index.d.ts",

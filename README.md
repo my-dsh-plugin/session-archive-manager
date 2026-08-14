@@ -22,6 +22,8 @@ The harness does not ship the unarchive/delete APIs yet (no upstream release cha
 
 ## Install
 
+**The plugin itself never needs to be built.** The repository ships the prebuilt host entry and browser bundle in `lib/` (committed), so installing is a clone/pull plus one CLI command — no `pnpm install` in this repo, no `prepare` scripts, no `allowBuilds` approvals. The only build in the whole flow is the harness's own, for the core patch in step 1.
+
 ### 1. Patch the harness core
 
 From this repository, against your deepseek-harness checkout (pinned to base commit `47f943859b`; a different commit may need `git apply -3`):
@@ -35,15 +37,24 @@ npm run build:lib:client
 
 The patch (`patches/dsh-core-unarchive-delete.patch`) adds the two workspace RPCs, the session-persistence delete seam with JSONL/SQLite backends, the client-runtime actions, and their tests. It is additive only — no existing behavior changes.
 
-### 2. Install the plugin into your web profile
+### 2. Install the plugin (no build needed)
 
-The official way — `dsh` CLI from your harness checkout, with `DSH_HOME` pointing at your harness home if it is not the default `~/.dsh`:
+**From a local clone (recommended for iterating)** — installs as a link: the committed `lib/` is served as-is, and `git pull` in the clone updates the plugin without any build:
 
 ```sh
+git clone https://github.com/my-dsh-plugin/session-archive-manager.git
 pnpm dsh plugin add --profile web /path/to/session-archive-manager
 ```
 
-This adds the dependency and reconciles the `dsh.profile.bundles` layer list. The manual equivalent is editing the profile's `package.json`:
+(`dsh` CLI from your harness checkout; set `DSH_HOME` to your harness home if it is not the default `~/.dsh`.)
+
+**Straight from git** — pnpm fetches the repository and uses the committed `lib/`; no build script runs:
+
+```sh
+pnpm dsh plugin add --profile web github:my-dsh-plugin/session-archive-manager
+```
+
+`dsh plugin add` adds the dependency and reconciles the `dsh.profile.bundles` layer list. The manual equivalent is editing the profile's `package.json`:
 
 ```json
 "dependencies": {
@@ -83,13 +94,16 @@ The regeneration covers only this plugin's core extension (unrelated local chang
 
 ## Development
 
+Building is only for **changing the plugin itself** — consumers never build. It requires the sibling `deepseek-harness` checkout (`../deepseek-harness`) because the client bundle is produced by the shared harness preset:
+
 ```sh
-pnpm build      # tsc + tsdown + client bundle (needs the sibling harness checkout)
-pnpm typecheck  # host + client type checks
-pnpm test       # controller unit tests
+pnpm install
+pnpm test       # vitest: controller and row-assembly suites
+pnpm typecheck  # tsc -b over src + tests against the harness checkout
+pnpm build      # tsc declarations + tsdown host + client bundle into lib/
 ```
 
-The client bundle is produced by the shared harness preset (`packages/client/tsdown.client.ts`). The repository ships the prebuilt `lib/` so consumers can clone and use without building; rebuild only when changing the plugin.
+After a build, commit `lib/` so consumers keep getting the prebuilt artifacts (a `git pull` is all a link-installed profile needs to pick up a change).
 
 ## Known Limitations and Deferred Work
 

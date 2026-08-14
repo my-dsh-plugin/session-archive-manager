@@ -22,6 +22,8 @@ Harness 目前尚未内置取消归档/删除 API（也没有上游发布渠道�
 
 ## 安装
 
+**插件本身永远不需要构建。** 仓库随附预构建的宿主入口与浏览器 bundle（`lib/` 已入库），安装 = 克隆/拉取 + 一条命令 —— 本仓库不用 `pnpm install`、没有 `prepare` 脚本、不需要 `allowBuilds` 批准。整个流程里唯一的构建是第 1 步给核心打补丁后 harness 自己的重建。
+
 ### 1. 给 Harness 核心打补丁
 
 在本仓库目录下，对着你的 deepseek-harness checkout 执行（补丁固定基于上游提交 `47f943859b`；其他提交可能需要 `git apply -3` 手工解决）：
@@ -35,15 +37,24 @@ npm run build:lib:client
 
 补丁文件为 `patches/dsh-core-unarchive-delete.patch`，新增两个 workspace RPC、session-persistence 的 delete 能力（JSONL/SQLite 后端）、客户端 runtime 动作及配套测试。纯增量改动，不改变任何现有行为。
 
-### 2. 把插件安装进 web profile
+### 2. 安装插件（无需构建）
 
-官方方式 —— 用你 harness checkout 里的 `dsh` CLI（如果 `DSH_HOME` 不是默认的 `~/.dsh`，请指向你的 harness home）：
+**本地克隆安装（推荐，便于迭代）** —— 以 link 方式安装：直接使用已入库的 `lib/`，在克隆目录里 `git pull` 即可更新插件，无需任何构建：
 
 ```sh
+git clone https://github.com/my-dsh-plugin/session-archive-manager.git
 pnpm dsh plugin add --profile web /path/to/session-archive-manager
 ```
 
-该命令会添加依赖并自动 reconcile `dsh.profile.bundles` 图层列表。手工等价做法是编辑 profile 的 `package.json`：
+（用你 harness checkout 里的 `dsh` CLI；`DSH_HOME` 不是默认的 `~/.dsh` 时请指向你的 harness home。）
+
+**直接 git 安装** —— pnpm 拉取仓库后直接使用已入库的 `lib/`，不会运行任何构建脚本：
+
+```sh
+pnpm dsh plugin add --profile web github:my-dsh-plugin/session-archive-manager
+```
+
+`dsh plugin add` 会添加依赖并自动 reconcile `dsh.profile.bundles` 图层列表。手工等价做法是编辑 profile 的 `package.json`：
 
 ```json
 "dependencies": {
@@ -83,13 +94,16 @@ git -C /path/to/deepseek-harness stash pop
 
 ## 开发
 
+构建只服务于**改动插件本身** —— 使用者永远不需要构建。因为客户端 bundle 由 harness 共享预设产出，需要旁边的 `deepseek-harness` checkout（`../deepseek-harness`）：
+
 ```sh
-pnpm build      # tsc + tsdown + 客户端 bundle（需要旁边的 harness checkout）
-pnpm typecheck  # 宿主与客户端类型检查
-pnpm test       # 控制器单元测试
+pnpm install
+pnpm test       # vitest：控制器与行组装测试
+pnpm typecheck  # tsc -b 检查 src 与测试（对照 harness checkout）
+pnpm build      # tsc 声明 + tsdown 宿主 + 客户端 bundle 到 lib/
 ```
 
-客户端 bundle 使用 harness 共享预设（`packages/client/tsdown.client.ts`）构建。仓库随附预构建的 `lib/`，使用者克隆即可用、无需构建；只有改动插件本身时才需要重建。
+构建完成后请把 `lib/` 一并提交，保证使用者拿到的始终是预构建产物（link 安装的 profile 只需 `git pull` 即可收到更新）。
 
 ## 已知限制与待办
 
