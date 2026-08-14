@@ -16,6 +16,12 @@ Manage archived sessions from DeepSeek Harness Settings: view, unarchive, delete
 
 The plugin is UI-only. It derives the archived-session rows by cross-referencing the live `workspaces.list` archive set with `sessions.list` summaries, and every action rides the core `workspace.unarchiveSession` / `workspace.deleteSession` RPCs through the `workspaces` runtime service. Nothing polls, and nothing runs on the host side beyond the RPCs themselves.
 
+## Screenshot
+
+![Archived Sessions settings page](assets/settings-full.png)
+
+The **Archived Sessions** entry sits in Settings right after **Plugins**. Rows are grouped by workspace with a small group title; sessions no workspace accounts fall into the **Ungrouped** bucket at the end. Batch actions — unarchive, delete selected, delete all — live in the toolbar above the list.
+
 ## Requirements
 
 The harness does not ship the unarchive/delete APIs yet (no upstream release channel), so **a source checkout of deepseek-harness with the bundled patch applied is required today**. On a harness without the APIs the settings page shows the archive list read-only with an upgrade notice.

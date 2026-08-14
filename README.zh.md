@@ -16,6 +16,12 @@
 
 本插件只提供界面。归档行由实时的 `workspaces.list` 归档集合与 `sessions.list` 摘要交叉派生而来，所有操作都通过 `workspaces` 运行时服务调用核心的 `workspace.unarchiveSession` / `workspace.deleteSession` RPC。没有轮询，宿主侧除了 RPC 本身没有任何插件代码。
 
+## 截图
+
+![归档会话设置页](assets/settings-full.png)
+
+设置页「插件」之后的「归档会话」入口。归档会话按工作区分组并显示小组标题，未归属任何工作区的会话收进末尾的「未分组」桶；列表上方的工具栏提供取消归档、删除所选与全量删除。
+
 ## 依赖要求
 
 Harness 目前尚未内置取消归档/删除 API（也没有上游发布渠道），所以**现阶段必须使用 deepseek-harness 源码 checkout 并应用本仓库随附的补丁**。缺少这些 API 时，设置页会以只读方式显示归档列表并提示升级。
