@@ -62,6 +62,12 @@
 .list {
   display: flex;
   flex-direction: column;
+  /* The harness ships no global list reset: a plain <ul> carries the UA
+   * 40px left padding and disc markers. Reset both so rows start at the
+   * border. */
+  margin: 0;
+  padding: 0;
+  list-style: none;
   border: 1px solid var(--dsw-alias-border-l2);
   border-radius: 12px;
   overflow: hidden;
