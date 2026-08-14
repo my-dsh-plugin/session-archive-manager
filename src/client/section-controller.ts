@@ -7,14 +7,21 @@
  * @module dsh-session-archive-manager/client/section-controller
  */
 
-import type { SessionId, SessionSummary, WorkspaceView } from '@deepseek-ai/dsh-api-remotes/client'
-import type { SessionListState, WorkspaceListState } from '@deepseek-ai/dsh-client-runtime/client'
+import type { SessionId, WorkspaceView } from '@deepseek-ai/dsh-api-remotes/client'
+// The CLIENT-side summary shape the runtime store carries (id/displayTitle/
+// projectionValues) — NOT the wire shape (sessionId/projections) the host
+// sends. Reading the wire fields off the store's rows yields no titles.
+import type { SessionListState, SessionSummary, WorkspaceListState } from '@deepseek-ai/dsh-client-runtime/client'
 
 /** One archived session row the settings page renders, in archive order. */
 export interface ArchiveRow {
   /** The archived session id. */
   sessionId: SessionId
-  /** Display title from the session's `title` projection; falls back to the untitled copy key. */
+  /**
+   * Human-facing label exactly as the sidebar shows it (durable title,
+   * project basename, then the raw id); undefined only when the session has
+   * no summary at all (its log vanished, or the list has not caught up).
+   */
   title: string | undefined
   /** Working directory (header.cwd passthrough); absent when unrecorded. */
   cwd: string | undefined
@@ -47,17 +54,14 @@ export interface BatchResult {
 }
 
 /**
- * The `title` projection value of one session summary: a plain string after
- * the first `session/title` event, `null` before it, absent without a
- * projection block. Read through a structural cast because the projection
- * map is merge-extensible and this page must not depend on the title
- * package's types.
- * @param summary - the session summary row.
- * @returns the title text, or `undefined` when none exists yet.
+ * The display label of one client-side session summary: `displayTitle` is
+ * always present on the store's rows (title → project basename → id); the
+ * `title` fallback covers a row shape without it.
+ * @param summary - the client-side session summary row.
+ * @returns the display label, or `undefined` when the row carries neither.
  */
 export function titleOf(summary: SessionSummary): string | undefined {
-  const value = (summary.projections?.values as { title?: unknown } | undefined)?.title
-  return typeof value === 'string' ? value : undefined
+  return summary.displayTitle ?? summary.title
 }
 
 /**
