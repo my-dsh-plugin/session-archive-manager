@@ -44,10 +44,19 @@ if (diff.trim().length === 0) {
   console.error(`no diff between ${BASE} and HEAD; nothing to write`)
   process.exit(1)
 }
-execFileSync('git', ['apply', '--check', '--reverse', patch], { cwd: harness, stdio: 'pipe' })
 
 const { writeFileSync } = await import('node:fs')
 writeFileSync(patch, diff)
+
+// Verify the FRESH patch reverse-applies cleanly against the checkout, i.e.
+// it describes HEAD exactly — a stale or partial write would fail here.
+try {
+  execFileSync('git', ['apply', '--check', '--reverse', patch], { cwd: harness, stdio: 'pipe' })
+} catch {
+  console.error(`regenerated patch does not describe ${BASE}..HEAD exactly; refusing`)
+  process.exit(1)
+}
+
 console.log(`Regenerated ${patch} from ${BASE}..HEAD`)
 console.log('Verify it applies cleanly to the new base before committing:')
 console.log(`  git -C ${harness} stash && git apply --check ${patch} && git stash pop`)

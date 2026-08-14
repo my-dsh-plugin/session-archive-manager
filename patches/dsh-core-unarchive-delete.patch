@@ -267,7 +267,7 @@ index f902ba38d7..2474120571 100644
  
  export interface TestHarness {
 diff --git a/packages/host/apiproxy/src/api-proxy.ts b/packages/host/apiproxy/src/api-proxy.ts
-index bda99362b6..17aebfa95f 100644
+index bda99362b6..51d17db55e 100644
 --- a/packages/host/apiproxy/src/api-proxy.ts
 +++ b/packages/host/apiproxy/src/api-proxy.ts
 @@ -25,7 +25,7 @@ import { isUserInvocable } from '@deepseek-ai/dsh-skill'
@@ -328,6 +328,19 @@ index bda99362b6..17aebfa95f 100644
      },
  
      host: {
+@@ -3557,6 +3592,12 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
+           ctx.on('session/disposed', (session: Session) => {
+             queue.push(frame({ type: 'host/session-removed', sessionId: session.id }))
+           }),
++          // A durable delete through the workspace registry drops the session
++          // from every surface with the same frame disposal uses, so clients
++          // do not wait for their next session.list baseline.
++          ctx.on('session/deleted', (sessionId: SessionId) => {
++            queue.push(frame({ type: 'host/session-removed', sessionId }))
++          }),
+           ctx.on('agent/status', ({ agent, status }: { agent: Agent; status: AgentStatus }) => {
+             queue.push(frame({ type: 'host/session-status', sessionId: agent.id, running: status === 'running' }))
+           }),
 diff --git a/packages/host/apiproxy/src/api/rpc-map.ts b/packages/host/apiproxy/src/api/rpc-map.ts
 index 80dede1799..a702083bf3 100644
 --- a/packages/host/apiproxy/src/api/rpc-map.ts
@@ -506,10 +519,22 @@ index ef642082ac..4b2ae2b61b 100644
      }
      const coordinator = new PersistenceCoordinator(ctx, backend)
 diff --git a/packages/host/apiproxy/tests/api-proxy-workspace.spec.ts b/packages/host/apiproxy/tests/api-proxy-workspace.spec.ts
-index 54bdb015e4..fb4d41c3b9 100644
+index 54bdb015e4..0acea665fc 100644
 --- a/packages/host/apiproxy/tests/api-proxy-workspace.spec.ts
 +++ b/packages/host/apiproxy/tests/api-proxy-workspace.spec.ts
-@@ -567,4 +567,55 @@ describe('Host Workspace increments', () => {
+@@ -75,7 +75,10 @@ async function harness(
+   const storageDomain = new DomainFacility(ctx, { backend: 'memory', routes: {} })
+   ctx.storage.mount('domain', storageDomain)
+   ctx.provide('storageDomain', storageDomain)
+-  ctx.provide('sessionPersistence', { list: () => Promise.resolve([]) } as never)
++  ctx.provide('sessionPersistence', {
++    list: () => Promise.resolve([]),
++    delete: () => Promise.resolve(),
++  } as never)
+   await ctx.plugin(WorkspaceRegistry)
+ 
+   const factory: AgentFactory = {
+@@ -567,4 +570,79 @@ describe('Host Workspace increments', () => {
      })
      abort.abort()
    })
@@ -547,11 +572,15 @@ index 54bdb015e4..fb4d41c3b9 100644
 +    abort.abort()
 +  })
 +
-+  it('refuses to delete a live session with session-live and an unknown one with session-not-found', async () => {
-+    const { api, root } = await harness()
++  it('refuses to delete a running session with session-live and an unknown one with session-not-found', async () => {
++    const { api, ctx, root } = await harness()
 +    const workspace = expectOk(await api.workspace.create(request({ path: stageDir(root, 'delete-home') }))).workspace
 +    const sessionId = SessionId('session-to-delete')
 +    expectOk(await api.sessions.create(request({ workspaceId: workspace.workspaceId, sessionId })))
++    // The harness factory registers an idle agent; flip it to running.
++    const agent = ctx.agents.get(sessionId)
++    expect(agent).toBeDefined()
++    ;(agent as { status: string }).status = 'running'
 +
 +    const live = await api.workspace.deleteSession(request({ sessionId }))
 +    expect(live.result).toMatchObject({
@@ -563,6 +592,26 @@ index 54bdb015e4..fb4d41c3b9 100644
 +      ok: false,
 +      error: { code: 'session-not-found', details: { sessionId: 'session-ghost' } },
 +    })
++  })
++
++  it('deletes an idle resident session durably and streams host/session-removed', async () => {
++    const { api, root } = await harness()
++    const workspace = expectOk(await api.workspace.create(request({ path: stageDir(root, 'delete-idle') }))).workspace
++    const sessionId = SessionId('session-to-delete-idle')
++    expectOk(await api.sessions.create(request({ workspaceId: workspace.workspaceId, sessionId })))
++    expectOk(await api.workspace.archiveSession(request({ sessionId })))
++
++    const abort = new AbortController()
++    const stream: AsyncIterator<RpcRequest<HostFrame>> =
++      api.events.host(request({}), abort.signal)[Symbol.asyncIterator]()
++    expect(expectOk(await api.workspace.deleteSession(request({ sessionId }))).archivedSessionIds)
++      .toEqual([])
++    // The durable delete relays the removal so clients drop the row without
++    // waiting for their next session.list baseline.
++    const first = (await nextHostFrame(stream)).payload.type
++    const second = (await nextHostFrame(stream)).payload.type
++    expect([first, second]).toContain('host/session-removed')
++    abort.abort()
 +  })
  })
 diff --git a/packages/host/apiproxy/tests/client-handler.spec.ts b/packages/host/apiproxy/tests/client-handler.spec.ts
@@ -735,7 +784,7 @@ index 969f1f5fac..ff8dae2c89 100644
    async readStoredRevision(id: SessionId, signal?: AbortSignal): Promise<PersistenceRevision | undefined> {
      signal?.throwIfAborted()
 diff --git a/packages/session/session-persistence/src/coordinator.ts b/packages/session/session-persistence/src/coordinator.ts
-index eb5f9714c4..69494e70a2 100644
+index eb5f9714c4..b48434398f 100644
 --- a/packages/session/session-persistence/src/coordinator.ts
 +++ b/packages/session/session-persistence/src/coordinator.ts
 @@ -183,6 +183,14 @@ export interface PersistenceBackend<TornMarker = unknown> {
@@ -753,26 +802,29 @@ index eb5f9714c4..69494e70a2 100644
    /**
     * Make a crash repair durable: truncate the torn tail (iff
     * `tornMarker !== undefined`) and append `closers` (iff any). NOT required to
-@@ -999,6 +1007,29 @@ export class PersistenceCoordinator<TornMarker = unknown> {
+@@ -999,6 +1007,32 @@ export class PersistenceCoordinator<TornMarker = unknown> {
  
    // Listing is a direct backend read and needs no coordinator state.
  
 +  /**
-+   * Durably delete one session's stored log. Refuses while the session is
-+   * live (attached to the session store) or its buffered tail is still
-+   * draining; an absent session resolves without writing. Runs on the id's
-+   * serialization chain, so it cannot interleave with a concurrent append,
-+   * repair, or preparation commit: a queued delete waits for them, and one
-+   * that runs first invalidates any cached preparation and drops the
-+   * in-memory state, so a later {@link create} may reuse the id.
++   * Durably delete one session's stored log. Refuses while the session has
++   * queued or in-flight events in its write-behind (the durable log would
++   * lose that tail) or while its buffered tail is still draining; a session
++   * attached to the store with a drained write-behind is deletable — its log
++   * disappears from every surface, and a later append fails loudly instead
++   * of corrupting. Runs on the id's serialization chain, so a queued delete
++   * waits for any earlier append, and one that runs first invalidates any
++   * cached preparation and drops the in-memory state, so a later
++   * {@link create} may reuse the id.
 +   * @param id - the persisted session to delete.
 +   * @returns resolution after the artifact is gone.
 +   */
 +  delete(id: SessionId): Promise<void> {
 +    return this.serialize(id, async () => {
 +      await this.waitForRetirement(id)
-+      if (this.ctx.sessions.get(id) !== undefined) {
-+        throw new Error(`cannot delete session "${id}" while it is live`)
++      const live = [...this.live.entries()].find(([session]) => session.id === id)?.[1]
++      if (live !== undefined && live.writes.hasWork) {
++        throw new Error(`cannot delete session "${id}" while it has pending writes`)
 +      }
 +      this.preparations.invalidate(id)
 +      await this.backend.deleteStored(id)
@@ -808,10 +860,10 @@ index d579dc46d9..3fd2b007b2 100644
     * List materialized sessions with cheap per-log change tokens.
     *
 diff --git a/packages/session/session-persistence/tests/coordinator-contract.ts b/packages/session/session-persistence/tests/coordinator-contract.ts
-index 8633faa886..00f707ddbb 100644
+index 8633faa886..276e71311c 100644
 --- a/packages/session/session-persistence/tests/coordinator-contract.ts
 +++ b/packages/session/session-persistence/tests/coordinator-contract.ts
-@@ -1301,6 +1301,65 @@ export function runCoordinatorContract(name: string, makeFixture: () => Promise<
+@@ -1301,6 +1301,69 @@ export function runCoordinatorContract(name: string, makeFixture: () => Promise<
        }
      })
  
@@ -850,7 +902,7 @@ index 8633faa886..00f707ddbb 100644
 +      }
 +    })
 +
-+    it('delete refuses a live session and succeeds once its tail has drained', async () => {
++    it('delete refuses while the write-behind holds events and succeeds once drained, even while attached', async () => {
 +      const fix = await makeFixture()
 +      const { ctx, fiber } = await freshCtx(fix)
 +      let session!: Session
@@ -859,14 +911,18 @@ index 8633faa886..00f707ddbb 100644
 +      }, { inject: ['sessions'] }))
 +      try {
 +        session.append('turn/start', { turn: 1 })
++        // Unflushed events: deletion must not drop the queued tail.
++        await expect(ctx.sessionPersistence.delete(session.id)).rejects.toThrow(/pending writes/)
 +        await ctx.sessions.flush(session)
-+        await expect(ctx.sessionPersistence.delete(session.id)).rejects.toThrow(/while it is live/)
 +
-+        await sessionFiber.dispose()
-+        await vi.waitFor(async () => {
-+          await ctx.sessionPersistence.delete(session.id)
-+        })
++        // Drained: deletion proceeds even though the session is still attached.
++        await ctx.sessionPersistence.delete(session.id)
 +        expect(await ctx.sessionPersistence.list()).toEqual([])
++
++        // A later append on the still-attached session fails loudly, not corrupts.
++        await expect(ctx.sessionPersistence.append(session.id, [{
++          type: 'step/start', seq: 1, time: 2, data: { turn: 1, step: 1 },
++        } as SessionEvent])).rejects.toThrow(/not found/)
 +      } finally {
 +        await sessionFiber.dispose()
 +        await fiber.dispose()
@@ -959,11 +1015,41 @@ index 4f6b2122cb..9851c9910e 100644
 +    })
 +  }
  }
+diff --git a/packages/workspace/workspace/package.json b/packages/workspace/workspace/package.json
+index c513141e74..cb0b295471 100644
+--- a/packages/workspace/workspace/package.json
++++ b/packages/workspace/workspace/package.json
+@@ -37,6 +37,7 @@
+   ],
+   "license": "MIT",
+   "peerDependencies": {
++    "@deepseek-ai/dsh-agent": "workspace:^",
+     "@deepseek-ai/dsh-brand": "workspace:^",
+     "@deepseek-ai/dsh-storage-domain": "workspace:^",
+     "@deepseek-ai/dsh-invariants": "workspace:^",
+@@ -49,6 +50,7 @@
+     "zod": "^4.4.3"
+   },
+   "devDependencies": {
++    "@deepseek-ai/dsh-agent": "workspace:^",
+     "@deepseek-ai/dsh-brand": "workspace:^",
+     "@deepseek-ai/dsh-storage-domain": "workspace:^",
+     "@deepseek-ai/dsh-invariants": "workspace:^",
 diff --git a/packages/workspace/workspace/src/index.ts b/packages/workspace/workspace/src/index.ts
-index 87edb28cad..48c7a573d3 100644
+index 87edb28cad..064bbf34f1 100644
 --- a/packages/workspace/workspace/src/index.ts
 +++ b/packages/workspace/workspace/src/index.ts
-@@ -39,19 +39,35 @@ export function WorkspaceId(id: string): WorkspaceId {
+@@ -9,6 +9,9 @@ import { randomUUID } from 'node:crypto'
+ import { stat } from 'node:fs/promises'
+ import { basename } from 'node:path'
+ import { Context, Service } from '@deepseek-ai/cordis'
++// Type-only: the ctx.agents Context merge and the agent status used by the
++// deleteSession liveness gate.
++import type {} from '@deepseek-ai/dsh-agent'
+ import type { SessionHeader, SessionId } from '@deepseek-ai/dsh-session'
+ import type {} from '@deepseek-ai/dsh-session-persistence'
+ import type { DomainGlobal, KvTable } from '@deepseek-ai/dsh-storage-domain'
+@@ -39,19 +42,37 @@ export function WorkspaceId(id: string): WorkspaceId {
  }
  
  /**
@@ -985,16 +1071,18 @@ index 87edb28cad..48c7a573d3 100644
  }
  
 +/**
-+ * A deleteSession request named a session currently attached to the live
-+ * session store. Deleting a live session's log underneath its running owner
-+ * would corrupt the conversation, so deletion refuses while it is live.
++ * A deleteSession request named a session whose agent is currently running a
++ * turn. Deleting a running session's log underneath its live writer would
++ * corrupt the in-flight turn, so deletion refuses while it is running; an
++ * idle resident session (no running agent, no pending persistence writes) is
++ * deletable.
 + */
 +export class WorkspaceSessionLiveError extends Error {
 +  /**
-+   * @param sessionId - The live session id.
++   * @param sessionId - The running session id.
 +   */
 +  constructor(readonly sessionId: SessionId) {
-+    super(`cannot delete session '${sessionId}': the session is live; close it before deleting`)
++    super(`cannot delete session '${sessionId}': the session is running; stop it before deleting`)
 +    this.name = 'WorkspaceSessionLiveError'
 +  }
 +}
@@ -1002,7 +1090,25 @@ index 87edb28cad..48c7a573d3 100644
  /** A workspace reorder named a source or anchor absent from the durable registry order. */
  export class WorkspaceOrderInvalidError extends Error {
    /**
-@@ -254,6 +270,82 @@ export class WorkspaceRegistry extends Service {
+@@ -68,6 +89,17 @@ declare module '@deepseek-ai/cordis' {
+   interface Context {
+     workspaceRegistry: WorkspaceRegistry
+   }
++  interface Events {
++    /**
++     * A session's durable log was deleted through the workspace registry.
++     * Emitted after the log deletion committed, so consumers (session list
++     * surfaces, projections) can drop the id instead of waiting for their
++     * next baseline.
++     * @mode emit
++     * @param sessionId - the deleted session id.
++     */
++    'session/deleted'(sessionId: SessionId): void
++  }
+ }
+ 
+ interface BootstrapGroup {
+@@ -254,6 +286,91 @@ export class WorkspaceRegistry extends Service {
      })
    }
  
@@ -1030,19 +1136,27 @@ index 87edb28cad..48c7a573d3 100644
 +  /**
 +   * Delete one session durably: remove its stored log through session
 +   * persistence, drop it from the header index, the registry-global archive
-+   * set, and every workspace's session accounting. A session attached to the
-+   * live session store refuses with {@link WorkspaceSessionLiveError}; a
-+   * session neither live nor in session persistence fails with
-+   * {@link WorkspaceUnknownSessionError}. The log deletion is the commit
-+   * point — the header-index and accounting cleanup that follows it is
-+   * best-effort and logs failures, because a reportable failure after the
++   * set, and every workspace's session accounting. A session whose agent is
++   * running a turn refuses with {@link WorkspaceSessionLiveError}; a session
++   * neither live nor in session persistence fails with
++   * {@link WorkspaceUnknownSessionError}. An idle resident session (attached
++   * to the store but with no running agent) is deletable — persistence
++   * itself refuses while unflushed writes remain — and every surface drops
++   * it via the emitted `session/deleted` event. The log deletion is the
++   * commit point — the header-index and accounting cleanup that follows it
++   * is best-effort and logs failures, because a reportable failure after the
 +   * log is gone would only invite a doomed retry.
 +   * @param sessionId - The session to delete.
 +   * @returns resolution after the log deletion committed.
 +   */
 +  deleteSession(sessionId: SessionId): Promise<void> {
 +    return this.enqueueOperation(async () => {
-+      if (this.ctx.get('sessions')?.get(sessionId) !== undefined) {
++      // The agent gate, not store attachment: GUI sessions stay resident in
++      // the store after their last turn, so attachment alone would make
++      // deletion impossible without a restart. Only a running turn owns an
++      // un-deletable log tail.
++      const agent = this.ctx.get('agents')?.get(sessionId)
++      if (agent !== undefined && agent.status === 'running') {
 +        throw new WorkspaceSessionLiveError(sessionId)
 +      }
 +      if (!(await this.sessionKnown(sessionId))) {
@@ -1054,6 +1168,7 @@ index 87edb28cad..48c7a573d3 100644
 +      this.headers.delete(sessionId)
 +      this.sessionPaths.delete(sessionId)
 +      this.invalidSessionPaths.delete(sessionId)
++      this.ctx.emit('session/deleted', sessionId)
 +      const state = this.requireState()
 +      const archivedSessionIds = state.archivedSessionIds.filter(id => id !== sessionId)
 +      if (archivedSessionIds.length !== state.archivedSessionIds.length) {
@@ -1086,10 +1201,19 @@ index 87edb28cad..48c7a573d3 100644
     * Whether a session is live, header-indexed, or present in a fresh
     * persistence listing. Only a definite miss returns false — a failing
 diff --git a/packages/workspace/workspace/tests/workspace.spec.ts b/packages/workspace/workspace/tests/workspace.spec.ts
-index 22900c7649..d5be5cc889 100644
+index 22900c7649..b5ffaf3785 100644
 --- a/packages/workspace/workspace/tests/workspace.spec.ts
 +++ b/packages/workspace/workspace/tests/workspace.spec.ts
-@@ -48,7 +48,8 @@ async function harness(options: HarnessOptions = {}) {
+@@ -30,6 +30,8 @@ interface HarnessOptions {
+   pool?: MemoryMediaPool
+   sessions?: SessionHeader[]
+   liveSessions?: SessionHeader[]
++  /** Resident agents: `running` ids report status 'running'; `resident` ids report 'idle'. */
++  agents?: { resident?: SessionId[]; running?: SessionId[] }
+   sessionStore?: boolean
+   backend?: StorageBackend
+ }
+@@ -48,7 +50,8 @@ async function harness(options: HarnessOptions = {}) {
    const list = vi.fn(async () => listed)
    const load = vi.fn(() => { throw new Error('event bodies must not be loaded') })
    const inspect = vi.fn(() => { throw new Error('event bodies must not be inspected') })
@@ -1099,7 +1223,27 @@ index 22900c7649..d5be5cc889 100644
  
    if (options.sessionStore === true) {
      await ctx.plugin(SessionStore)
-@@ -75,6 +76,7 @@ async function harness(options: HarnessOptions = {}) {
+@@ -60,6 +63,19 @@ async function harness(options: HarnessOptions = {}) {
+     } as never)
+   }
+ 
++  if (options.agents !== undefined) {
++    const running = new Set((options.agents.running ?? []).map(id => String(id)))
++    const resident = new Set((options.agents.resident ?? []).map(id => String(id)))
++    ctx.provide('agents', {
++      get: (id: SessionId) => {
++        if (running.has(String(id))) return { status: 'running' }
++        if (resident.has(String(id))) return { status: 'idle' }
++        return undefined
++      },
++      list: () => [],
++    } as never)
++  }
++
+   const changes: DomainChanged[] = []
+   ctx.on('domain/changed', (change) => { changes.push(change) })
+   const fiber = await ctx.plugin(WorkspaceRegistry)
+@@ -75,6 +91,7 @@ async function harness(options: HarnessOptions = {}) {
      list,
      load,
      inspect,
@@ -1107,7 +1251,7 @@ index 22900c7649..d5be5cc889 100644
      setSessions: (headers: SessionHeader[]) => { listed = headers },
    }
  }
-@@ -941,4 +943,75 @@ describe('registry-global session archive', () => {
+@@ -941,4 +958,89 @@ describe('registry-global session archive', () => {
      const upgraded = await harness({ pool: legacy })
      expect(upgraded.registry.archivedSessionIds).toEqual([])
    })
@@ -1140,17 +1284,20 @@ index 22900c7649..d5be5cc889 100644
 +    expect(result.changes.filter(change => change.table === '').length).toBe(0)
 +  })
 +
-+  it('deletes a session durably: log, header index, archive set, and accounting', async () => {
++  it('deletes a session durably: log, header index, archive set, accounting, and the deleted event', async () => {
 +    const dir = await makeDir('delete-home')
 +    const result = await harness({ sessions: [header('s1', dir, 100), header('s2', dir, 200)] })
 +    const workspace = result.registry.list()[0]!
 +    await result.registry.archiveSession(SessionId('s1'))
++    const deleted: SessionId[] = []
++    result.ctx.on('session/deleted', (id: SessionId) => { deleted.push(id) })
 +
 +    await result.registry.deleteSession(SessionId('s1'))
 +    expect(result.del).toHaveBeenCalledWith(SessionId('s1'))
 +    expect(result.registry.archivedSessionIds).toEqual([])
 +    expect(workspace.sessionIds).toEqual(['s2'])
 +    expect(storedState(result.pool).archivedSessionIds).toEqual([])
++    expect(deleted).toEqual([SessionId('s1')])
 +    // The header index forgot the session: a re-archive reports a definite miss.
 +    await expect(result.registry.archiveSession(SessionId('s1')))
 +      .rejects.toThrow(/cannot archive session 's1'/)
@@ -1169,17 +1316,42 @@ index 22900c7649..d5be5cc889 100644
 +    expect(result.del).toHaveBeenCalledWith(SessionId('s1'))
 +  })
 +
-+  it('refuses to delete live and unknown sessions without writing', async () => {
-+    const dir = await makeDir('delete-live')
++  it('refuses to delete a running session and an unknown session without writing', async () => {
++    const dir = await makeDir('delete-running')
 +    const result = await harness({
 +      sessions: [header('s1', dir, 100)],
-+      liveSessions: [header('live', dir, 300)],
++      agents: { running: [SessionId('running')] },
 +    })
-+    await expect(result.registry.deleteSession(SessionId('live')))
-+      .rejects.toThrow(/the session is live/)
++    await expect(result.registry.deleteSession(SessionId('running')))
++      .rejects.toThrow(/the session is running/)
 +    await expect(result.registry.deleteSession(SessionId('ghost')))
 +      .rejects.toThrow(/cannot delete session 'ghost'/)
 +    expect(result.del).not.toHaveBeenCalled()
 +    expect(storedState(result.pool).archivedSessionIds).toEqual([])
 +  })
++
++  it('deletes an idle resident session: attached to the store but not running', async () => {
++    const dir = await makeDir('delete-idle')
++    const result = await harness({
++      sessions: [header('s1', dir, 100)],
++      liveSessions: [header('idle', dir, 200)],
++      agents: { resident: [SessionId('idle')] },
++    })
++    await result.registry.deleteSession(SessionId('idle'))
++    expect(result.del).toHaveBeenCalledWith(SessionId('idle'))
++  })
  })
+diff --git a/packages/workspace/workspace/tsconfig.json b/packages/workspace/workspace/tsconfig.json
+index eb18440d55..4c48f4b5c3 100644
+--- a/packages/workspace/workspace/tsconfig.json
++++ b/packages/workspace/workspace/tsconfig.json
+@@ -23,6 +23,9 @@
+     {
+       "path": "../../storage/storage-domain"
+     },
++    {
++      "path": "../../core/agent"
++    },
+     {
+       "path": "../../core/session"
+     },

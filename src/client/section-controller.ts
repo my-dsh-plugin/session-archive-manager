@@ -54,7 +54,12 @@ export interface CardSource<T> {
 
 /** The section's batch-action outcome: which ids failed and why. */
 export interface BatchResult {
-  failed: Array<{ sessionId: SessionId; message: string }>
+  failed: Array<{
+    sessionId: SessionId
+    message: string
+    /** RPC code extracted from the service error, when it is a business code. */
+    code?: string
+  }>
 }
 
 /**
@@ -246,11 +251,27 @@ export async function runActions(
     try {
       await action(sessionId)
     } catch (error: unknown) {
-      failed.push({
-        sessionId,
-        message: error instanceof Error ? error.message : String(error),
-      })
+      failed.push(failureOf(sessionId, error))
     }
   }
   return { failed }
+}
+
+/**
+ * Project one action failure, extracting the RPC code from the runtime
+ * service's `session <verb> failed: <code>: <message>` error format so the
+ * page can categorize known business rejections (a live session, a vanished
+ * session) instead of showing raw text.
+ * @param sessionId - the failed id.
+ * @param error - the thrown rejection.
+ * @returns the structured failure.
+ */
+export function failureOf(sessionId: SessionId, error: unknown): BatchResult['failed'][number] {
+  const message = error instanceof Error ? error.message : String(error)
+  const code = /^session (?:unarchive|delete) failed: ([\w-]+): /.exec(message)?.[1]
+  return {
+    sessionId,
+    message,
+    ...code === undefined ? {} : { code },
+  }
 }

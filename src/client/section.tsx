@@ -93,12 +93,13 @@ export function ArchiveManagerSection(props: ArchiveManagerSectionProps): React.
       setNotice({ kind: 'ok', text: t('done') })
       return
     }
-    setNotice({
-      kind: 'error',
-      text: result.failed.length === ids.length
-        ? t('failedDetail', { message: result.failed[0]?.message ?? '' })
-        : t('failed', { count: String(result.failed.length) }),
-    })
+    const liveCount = result.failed.filter(failure => failure.code === 'session-live').length
+    const text = result.failed.length === ids.length
+      ? t('failedDetail', { message: result.failed[0]?.message ?? '' })
+      : liveCount > 0
+        ? `${t('failed', { count: String(result.failed.length) })}${t('failedLive', { count: String(liveCount) })}`
+        : t('failed', { count: String(result.failed.length) })
+    setNotice({ kind: 'error', text })
     const failedIds = new Set(result.failed.map(failure => failure.sessionId))
     setSelected(current => new Set([...current].filter(id => !failedIds.has(id))))
   }

@@ -93,7 +93,7 @@ The client bundle is produced by the shared harness preset (`packages/client/tsd
 
 ## Known Limitations and Deferred Work
 
-- Deleting a session refuses while the session is live (attached to a running agent); close it first, then delete.
+- Deleting a session refuses only while its agent is running a turn; stop the turn first, then delete.
 - Attachments written by a deleted session are not garbage-collected; they remain in the attachment store, which is content-addressed and shared by log export.
 - The session-search index drops a deleted session on its next reconciliation; the running web client's sidebar refreshes from its own stores and may show the row until the next list refresh.
 
