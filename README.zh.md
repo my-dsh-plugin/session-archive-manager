@@ -85,6 +85,24 @@ pnpm dsh plugin add --profile web github:my-dsh-plugin/session-archive-manager
 - 页面显示只读提示 → 核心补丁没有生效（检查重建步骤，或旧进程是否完全退出）。
 - 完全没有菜单入口 → 插件不在运行中 profile 的 bundle 图层里（重新执行 `dsh plugin add`，检查 bundles 列表）。
 
+### DeepSeek Harness Desktop(桌面端)一键安装
+
+桌面端用户既不需要 harness checkout,也不需要打核心补丁:桌面端 harness 由 my-dsh-plugin
+fork 构建,已内置归档/恢复/删除的核心能力。在**普通终端**执行一次(不要在 App 自带的
+harness 会话里跑——那里的应用安装目录和 App 数据目录是沙箱/只读的,macOS 尤其如此):
+
+```sh
+bash <(curl -Ls https://raw.githubusercontent.com/my-dsh-plugin/session-archive-manager/main/scripts/install-desktop.sh) --restart
+```
+
+脚本幂等:从 GitHub 拉取插件(预编译 `lib/`,无需构建);若需要则把
+`"session-archive-manager"` 加入内嵌 harness 的 `WEB_SETTINGS_NAMESPACES` 白名单;装入桌面
+web profile 并注册 bundle;`--restart` 重启 App。之后设置里出现 **「归档会话」** 条目。
+可用环境变量覆盖:`DSH_DESKTOP_APP`、`DSH_DESKTOP_HOME`、`DSH_SKILL_SOURCE_DIR`。
+
+> 使用已发布桌面包的最终用户无需任何手动步骤 —— 升级重启即可;插件已 seed,白名单已在
+> 随包 harness 中。
+
 ## 维护
 
 补丁固定在一个 harness 基座提交上，上游移动后会产生漂移。你的 checkout 更新后，重新生成并验证补丁再提交：
